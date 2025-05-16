@@ -1,5 +1,17 @@
-"dependencies": {
-  "express": "^4.17.1",
-  "body-parser": "^1.19.0",
-  "crypto": "^1.0.1"
+{
+  "name": "creobot",
+  "version": "1.0.0",
+  "description": "Slack attendance bot",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.17.1",
+    "body-parser": "^1.19.0",
+    "moment-timezone": "^0.5.40"
+  },
+  "engines": {
+    "node": "18.x"
+  }
 }

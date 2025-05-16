@@ -1,69 +1,75 @@
-const express = require("express");
-const bodyParser = require("body-parser");
-const crypto = require("crypto");
+const express = require('express');
+const bodyParser = require('body-parser');
+const moment = require('moment-timezone');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+const TIMEZONE = 'Asia/Manila';
 
-// Slack signing secret from your .env
-const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
-
-// Middleware to parse urlencoded bodies
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Helper: verify Slack signature (for security, can skip in dev)
-function verifySlackRequest(req) {
-  const slackSignature = req.headers["x-slack-signature"];
-  const requestBody = req.rawBody || "";
-  const timestamp = req.headers["x-slack-request-timestamp"];
+// In-memory store for attendance (reset on restart)
+const attendance = {};
 
-  const sigBasestring = "v0:" + timestamp + ":" + requestBody;
-  const mySignature =
-    "v0=" +
-    crypto
-      .createHmac("sha256", SLACK_SIGNING_SECRET)
-      .update(sigBasestring, "utf8")
-      .digest("hex");
-  return crypto.timingSafeEqual(
-    Buffer.from(mySignature),
-    Buffer.from(slackSignature)
-  );
+// Helper: format time
+function formatTime(time) {
+  return moment(time, "h:mm A").isValid()
+    ? moment(time, "h:mm A").format("h:mm A")
+    : time;
 }
 
-// Optionally, add a route for Slack slash commands
-app.post("/slack/command/:command", (req, res) => {
-  // If you want to check signature, use verifySlackRequest(req)
-  const command = req.params.command;
-  const user = req.body.user_name || req.body.user_id || "user";
-  let textResponse = "";
+// Helper: get now in Manila
+function nowInManila() {
+  return moment().tz(TIMEZONE).format("h:mm A");
+}
 
-  if (command === "clockin") {
-    textResponse = `:white_check_mark: <@${user}> clocked in at ${new Date().toLocaleTimeString(
-      "en-US",
-      { timeZone: "Asia/Manila" }
-    )}!`;
-  } else if (command === "clockout") {
-    textResponse = `:wave: <@${user}> clocked out at ${new Date().toLocaleTimeString(
-      "en-US",
-      { timeZone: "Asia/Manila" }
-    )}!`;
-  } else if (command === "help") {
-    textResponse =
-      "Commands: `/clockin` - Clock in. `/clockout` - Clock out. `/help` - Show help.";
+// Main endpoint for Slack commands
+app.post("/slack/command/:command", (req, res) => {
+  const { command: cmd } = req.params;
+  const userId = req.body.user_id || req.body.user_name;
+  const userName = req.body.user_name || userId;
+  const text = req.body.text ? req.body.text.trim() : '';
+  let response = '';
+
+  if (cmd === "clockin") {
+    const clockInTime = text ? formatTime(text) : nowInManila();
+    if (!attendance[userId]) attendance[userId] = {};
+    if (attendance[userId].clockIn) {
+      response = `:warning: <@${userId}> already clocked in at ${attendance[userId].clockIn}.`;
+    } else {
+      attendance[userId].clockIn = clockInTime;
+      response = `:white_check_mark: <@${userId}> clocked in at ${clockInTime}.`;
+    }
+  } else if (cmd === "clockout") {
+    const clockOutTime = text ? formatTime(text) : nowInManila();
+    if (!attendance[userId] || !attendance[userId].clockIn) {
+      response = `:warning: <@${userId}> hasn't clocked in yet.`;
+    } else if (attendance[userId].clockOut) {
+      response = `:warning: <@${userId}> already clocked out at ${attendance[userId].clockOut}.`;
+    } else {
+      attendance[userId].clockOut = clockOutTime;
+      response = `:wave: <@${userId}> clocked out at ${clockOutTime}.`;
+    }
+  } else if (cmd === "help") {
+    response = [
+      "*CreoBot Attendance Commands:*",
+      "`/clockin [time]` – Clock in now or at a specified time (e.g., `/clockin 7:30 AM`).",
+      "`/clockout [time]` – Clock out now or at a specified time (e.g., `/clockout 6:00 PM`).",
+      "`/help` – Show this help message.",
+      "_Note: This version only stores today’s data while the bot is running._"
+    ].join('\n');
   } else {
-    textResponse = "Unknown command.";
+    response = ":grey_question: Unknown command. Try `/help` for usage.";
   }
 
-  // Respond to Slack (plain text)
-  res.status(200).send(textResponse);
+  res.status(200).send(response);
 });
 
-// Root endpoint (optional)
+// Test endpoint
 app.get("/", (req, res) => {
-  res.send("CreoBot is alive! 🚀");
+  res.send("CreoBot for Slack is running! 🚀");
 });
 
-// Start the server
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });
