@@ -1,213 +1,172 @@
-const express = require("express");
-const bodyParser = require("body-parser");
-const { google } = require("googleapis");
-const fs = require("fs");
-const moment = require("moment");
+const express = require('express');
+const bodyParser = require('body-parser');
+const { google } = require('googleapis');
+const fs = require('fs');
+const moment = require('moment-timezone');
+
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// ---- Google Sheets setup ---- //
-const SHEET_ID = "11pLzp9wpM6Acw4daxpf4c41SD24iQBVs6NQMxGy44Bs";
-const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
-const credentials = JSON.parse(fs.readFileSync("credentials.json"));
+// === Google Sheets Config ===
+const SPREADSHEET_ID = '11pLzp9wpM6Acw4daxpf4c41SD24iQBVs6NQMxGy44Bs'; // Your Sheet ID here
+const CREDENTIALS = JSON.parse(fs.readFileSync('credentials.json', 'utf8'));
+
+// Setup Google Sheets client
 const auth = new google.auth.JWT(
-  credentials.client_email,
+  CREDENTIALS.client_email,
   null,
-  credentials.private_key,
-  SCOPES
+  CREDENTIALS.private_key,
+  ['https://www.googleapis.com/auth/spreadsheets']
 );
-const sheets = google.sheets({ version: "v4", auth });
+const sheets = google.sheets({ version: 'v4', auth });
 
-// ---- Express setup ---- //
-app.use(bodyParser.urlencoded({ extended: true }));
+app.use(bodyParser.urlencoded({ extended: false }));
+app.use(bodyParser.json());
 
-// ---- Helper Functions ---- //
+// Utility functions for date/time
+function getManilaDate() {
+  return moment().tz('Asia/Manila').format('MM/DD/YYYY');
+}
+function getManilaTime() {
+  return moment().tz('Asia/Manila').format('hh:mm A');
+}
+function getYearTab() {
+  return moment().tz('Asia/Manila').format('YYYY');
+}
 
-// Ensure year tab exists, if not, create it with header row
-async function ensureYearSheet(year) {
-  const sheetTitle = year.toString();
-  const res = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
-  const existing = res.data.sheets.map(s => s.properties.title);
-  if (!existing.includes(sheetTitle)) {
-    // Add sheet/tab
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: SHEET_ID,
-      requestBody: {
-        requests: [{
-          addSheet: {
-            properties: {
-              title: sheetTitle
-            }
+// =============================
+// /clockin
+app.post('/slack/command/clockin', async (req, res) => {
+  const userName = req.body.user_name || 'Unknown';
+  const text = req.body.text || ''; // Allow custom time: /clockin 7:30 AM
+
+  let clockInTime = getManilaTime();
+  if (text.trim()) {
+    // Validate custom time format (e.g., "7:30 AM")
+    const clean = text.trim().toUpperCase();
+    if (/^(0?[1-9]|1[0-2]):[0-5][0-9]\s?(AM|PM)$/.test(clean)) {
+      clockInTime = clean;
+    } else {
+      res.json({ text: 'Invalid time format! Use HH:MM AM/PM, e.g., 7:30 AM' });
+      return;
+    }
+  }
+  const today = getManilaDate();
+  const yearTab = getYearTab();
+
+  // Write to Google Sheet
+  try {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${yearTab}!A:E`,
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [[userName, today, clockInTime, '', '']]
+      }
+    });
+    res.json({ text: `✅ Clocked in for *${userName}* at *${clockInTime}* on *${today}*.` });
+  } catch (e) {
+    res.json({ text: 'Error saving to sheet: ' + e.message });
+  }
+});
+
+// =============================
+// /clockout
+app.post('/slack/command/clockout', async (req, res) => {
+  const userName = req.body.user_name || 'Unknown';
+  const text = req.body.text || ''; // Allow custom time: /clockout 5:15 PM
+
+  let clockOutTime = getManilaTime();
+  if (text.trim()) {
+    const clean = text.trim().toUpperCase();
+    if (/^(0?[1-9]|1[0-2]):[0-5][0-9]\s?(AM|PM)$/.test(clean)) {
+      clockOutTime = clean;
+    } else {
+      res.json({ text: 'Invalid time format! Use HH:MM AM/PM, e.g., 5:15 PM' });
+      return;
+    }
+  }
+  const today = getManilaDate();
+  const yearTab = getYearTab();
+
+  try {
+    // Read the sheet and find the latest matching clock-in
+    const getRows = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${yearTab}!A:E`
+    });
+    const rows = getRows.data.values || [];
+    let updated = false;
+    // Find the last row matching user and today's date with no clockout
+    for (let i = rows.length - 1; i >= 0; i--) {
+      if (
+        rows[i][0] === userName &&
+        rows[i][1] === today &&
+        rows[i][2] &&
+        (!rows[i][3] || rows[i][3] === '')
+      ) {
+        // Calculate total hours
+        const clockInMoment = moment.tz(`${rows[i][1]} ${rows[i][2]}`, 'MM/DD/YYYY hh:mm A', 'Asia/Manila');
+        const clockOutMoment = moment.tz(`${today} ${clockOutTime}`, 'MM/DD/YYYY hh:mm A', 'Asia/Manila');
+        const diffHours = Math.max(0, clockOutMoment.diff(clockInMoment, 'minutes') / 60);
+        // Update row with clockOut and total hours
+        const rowNumber = i + 1;
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SPREADSHEET_ID,
+          range: `${yearTab}!D${rowNumber}:E${rowNumber}`,
+          valueInputOption: 'USER_ENTERED',
+          resource: {
+            values: [[clockOutTime, diffHours.toFixed(2)]]
           }
-        }]
+        });
+        updated = true;
+        res.json({ text: `✅ Clocked out for *${userName}* at *${clockOutTime}* on *${today}*.\n*Total hours worked:* ${diffHours.toFixed(2)} hrs.` });
+        break;
       }
-    });
-    // Add header row
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `${sheetTitle}!A1:E1`,
-      valueInputOption: "RAW",
-      requestBody: {
-        values: [[
-          "Name of Employee", "Date", "Clock In", "Clock Out", "Total Hours"
-        ]]
-      }
-    });
-  }
-}
-
-// Find next empty row for a given sheet/tab
-async function appendRow(sheetTitle, rowValues) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: `${sheetTitle}!A:E`,
-    valueInputOption: "USER_ENTERED",
-    insertDataOption: "INSERT_ROWS",
-    requestBody: {
-      values: [rowValues]
     }
-  });
-}
-
-// Fetch today's attendance from this year's tab
-async function getAttendanceByDate(sheetTitle, date) {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${sheetTitle}!A:E`
-  });
-  const rows = res.data.values || [];
-  return rows.filter(r => r[1] === date);
-}
-
-// Find row index of a user's attendance for today
-async function findUserRow(sheetTitle, name, date) {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${sheetTitle}!A:E`
-  });
-  const rows = res.data.values || [];
-  for (let i = 1; i < rows.length; i++) {
-    if ((rows[i][0] || "") === name && (rows[i][1] || "") === date) return i + 1; // Sheets is 1-indexed
+    if (!updated) {
+      res.json({ text: "No clock-in entry found for today or already clocked out." });
+    }
+  } catch (e) {
+    res.json({ text: 'Error updating sheet: ' + e.message });
   }
-  return null;
-}
-
-// Update a cell (clock in/out/total)
-async function updateCell(sheetTitle, rowIndex, colIndex, value) {
-  const colLetter = String.fromCharCode("A".charCodeAt(0) + colIndex);
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SHEET_ID,
-    range: `${sheetTitle}!${colLetter}${rowIndex}`,
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: [[value]] }
-  });
-}
-
-// ---- Slack Slash Command Endpoints ---- //
-
-// /clockin [optional_time]
-app.post("/slack/command/clockin", async (req, res) => {
-  const userName = req.body.user_name || "Unknown";
-  const text = (req.body.text ? req.body.text.trim() : "");
-  const now = moment();
-  const date = now.format("MM/DD/YYYY");
-  const year = now.format("YYYY");
-  const time = text ? text : now.format("hh:mm A");
-
-  await ensureYearSheet(year);
-
-  // Check if already clocked in
-  const userRow = await findUserRow(year, userName, date);
-  if (userRow) {
-    res.send(`:warning: You already clocked in today!`);
-    return;
-  }
-
-  await appendRow(year, [userName, date, time, "", ""]);
-  res.send(`:white_check_mark: Clocked in at *${time}* on ${date}.`);
 });
 
-// /clockout [optional_time]
-app.post("/slack/command/clockout", async (req, res) => {
-  const userName = req.body.user_name || "Unknown";
-  const text = (req.body.text ? req.body.text.trim() : "");
-  const now = moment();
-  const date = now.format("MM/DD/YYYY");
-  const year = now.format("YYYY");
-  const outTime = text ? text : now.format("hh:mm A");
-
-  await ensureYearSheet(year);
-
-  const userRow = await findUserRow(year, userName, date);
-  if (!userRow) {
-    res.send(`:x: You have not clocked in today!`);
-    return;
-  }
-
-  // Get current values (to calculate total)
-  const resSheet = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${year}!A${userRow}:E${userRow}`
-  });
-  const row = resSheet.data.values[0];
-  const inTime = row[2];
-
-  // Update clock out
-  await updateCell(year, userRow, 3, outTime);
-
-  // Calculate total hours
-  let total = "";
-  if (inTime && outTime) {
-    const inM = moment(inTime, ["h:mm A", "hh:mm A"]);
-    const outM = moment(outTime, ["h:mm A", "hh:mm A"]);
-    if (inM.isValid() && outM.isValid()) {
-      const diff = moment.duration(outM.diff(inM));
-      total = `${Math.floor(diff.asHours())}:${("0"+diff.minutes()).slice(-2)}`;
-      await updateCell(year, userRow, 4, total);
-    }
-  }
-
-  res.send(`:white_check_mark: Clocked out at *${outTime}* on ${date}. Total hours: ${total ? total : "N/A"}`);
-});
-
+// =============================
 // /viewattendance
-app.post("/slack/command/viewattendance", async (req, res) => {
-  const now = moment();
-  const date = now.format("MM/DD/YYYY");
-  const year = now.format("YYYY");
-  await ensureYearSheet(year);
-  const todayRows = await getAttendanceByDate(year, date);
-
-  if (todayRows.length <= 1) {
-    res.send("No attendance found for today.");
-    return;
+app.post('/slack/command/viewattendance', async (req, res) => {
+  const yearTab = getYearTab();
+  const today = getManilaDate();
+  try {
+    const getRows = await sheets.spreadsheets.values.get({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${yearTab}!A:E`
+    });
+    const rows = getRows.data.values || [];
+    const todayRows = rows.filter(row => row[1] === today);
+    if (!todayRows.length) {
+      res.json({ text: `No attendance records found for ${today}.` });
+      return;
+    }
+    let text = `*Attendance for ${today}:*\n\n`;
+    text += 'Name | Clock In | Clock Out | Total Hours\n';
+    text += '--- | --- | --- | ---\n';
+    todayRows.forEach(row => {
+      text += `${row[0]} | ${row[2] || '-'} | ${row[3] || '-'} | ${row[4] || '-'}\n`;
+    });
+    res.json({ text });
+  } catch (e) {
+    res.json({ text: 'Error reading sheet: ' + e.message });
   }
-
-  let text = `*Attendance for ${date}:*\n`;
-  for (let i = 1; i < todayRows.length; i++) {
-    const row = todayRows[i];
-    text += `• ${row[0]} — In: ${row[2] || "-"}, Out: ${row[3] || "-"}, Total: ${row[4] || "-"}\n`;
-  }
-  res.send(text);
 });
 
-// /help
-app.post("/slack/command/help", (req, res) => {
-  res.send(
-    "*CreoBot Attendance - Commands:*\n" +
-    "`/clockin [time]` – Record your clock-in (default: now). Example: `/clockin 8:00 AM`\n" +
-    "`/clockout [time]` – Record your clock-out (default: now). Example: `/clockout 5:30 PM`\n" +
-    "`/viewattendance` – See all today's attendance records\n" +
-    "`/help` – This help message"
-  );
+// =============================
+// Health check
+app.get('/', (req, res) => {
+  res.send('CreoBot Attendance is running!');
 });
 
-// ---- Basic Test/Health Endpoint ---- //
-app.get("/", (req, res) => {
-  res.send("CreoBot Attendance server running!");
-});
-
-// ---- Start server ---- //
+// =============================
 app.listen(PORT, () => {
-  console.log("Server running on port", PORT);
+  console.log(`Server is running on port ${PORT}`);
 });
