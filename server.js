@@ -1,202 +1,213 @@
 const express = require("express");
 const bodyParser = require("body-parser");
-const crypto = require("crypto");
-const moment = require("moment-timezone");
-
+const { google } = require("googleapis");
+const fs = require("fs");
+const moment = require("moment");
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// In-memory storage (resets on restart)
-const attendanceRecords = {};
-const ADMIN_USER_IDS = []; // Add your Slack User IDs for admin clear-all
+// ---- Google Sheets setup ---- //
+const SHEET_ID = "11pLzp9wpM6Acw4daxpf4c41SD24iQBVs6NQMxGy44Bs";
+const SCOPES = ["https://www.googleapis.com/auth/spreadsheets"];
+const credentials = JSON.parse(fs.readFileSync("credentials.json"));
+const auth = new google.auth.JWT(
+  credentials.client_email,
+  null,
+  credentials.private_key,
+  SCOPES
+);
+const sheets = google.sheets({ version: "v4", auth });
 
-const SLACK_SIGNING_SECRET = process.env.SLACK_SIGNING_SECRET;
+// ---- Express setup ---- //
+app.use(bodyParser.urlencoded({ extended: true }));
 
-// Middleware for Slack verification (raw body)
-app.use((req, res, next) => {
-  let data = "";
-  req.on("data", chunk => { data += chunk; });
-  req.on("end", () => {
-    req.rawBody = data;
-    next();
+// ---- Helper Functions ---- //
+
+// Ensure year tab exists, if not, create it with header row
+async function ensureYearSheet(year) {
+  const sheetTitle = year.toString();
+  const res = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  const existing = res.data.sheets.map(s => s.properties.title);
+  if (!existing.includes(sheetTitle)) {
+    // Add sheet/tab
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      requestBody: {
+        requests: [{
+          addSheet: {
+            properties: {
+              title: sheetTitle
+            }
+          }
+        }]
+      }
+    });
+    // Add header row
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${sheetTitle}!A1:E1`,
+      valueInputOption: "RAW",
+      requestBody: {
+        values: [[
+          "Name of Employee", "Date", "Clock In", "Clock Out", "Total Hours"
+        ]]
+      }
+    });
+  }
+}
+
+// Find next empty row for a given sheet/tab
+async function appendRow(sheetTitle, rowValues) {
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SHEET_ID,
+    range: `${sheetTitle}!A:E`,
+    valueInputOption: "USER_ENTERED",
+    insertDataOption: "INSERT_ROWS",
+    requestBody: {
+      values: [rowValues]
+    }
   });
+}
+
+// Fetch today's attendance from this year's tab
+async function getAttendanceByDate(sheetTitle, date) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${sheetTitle}!A:E`
+  });
+  const rows = res.data.values || [];
+  return rows.filter(r => r[1] === date);
+}
+
+// Find row index of a user's attendance for today
+async function findUserRow(sheetTitle, name, date) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${sheetTitle}!A:E`
+  });
+  const rows = res.data.values || [];
+  for (let i = 1; i < rows.length; i++) {
+    if ((rows[i][0] || "") === name && (rows[i][1] || "") === date) return i + 1; // Sheets is 1-indexed
+  }
+  return null;
+}
+
+// Update a cell (clock in/out/total)
+async function updateCell(sheetTitle, rowIndex, colIndex, value) {
+  const colLetter = String.fromCharCode("A".charCodeAt(0) + colIndex);
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID,
+    range: `${sheetTitle}!${colLetter}${rowIndex}`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: [[value]] }
+  });
+}
+
+// ---- Slack Slash Command Endpoints ---- //
+
+// /clockin [optional_time]
+app.post("/slack/command/clockin", async (req, res) => {
+  const userName = req.body.user_name || "Unknown";
+  const text = (req.body.text ? req.body.text.trim() : "");
+  const now = moment();
+  const date = now.format("MM/DD/YYYY");
+  const year = now.format("YYYY");
+  const time = text ? text : now.format("hh:mm A");
+
+  await ensureYearSheet(year);
+
+  // Check if already clocked in
+  const userRow = await findUserRow(year, userName, date);
+  if (userRow) {
+    res.send(`:warning: You already clocked in today!`);
+    return;
+  }
+
+  await appendRow(year, [userName, date, time, "", ""]);
+  res.send(`:white_check_mark: Clocked in at *${time}* on ${date}.`);
 });
 
-// Needed for parsing Slack body
-app.use(bodyParser.urlencoded({ extended: false }));
+// /clockout [optional_time]
+app.post("/slack/command/clockout", async (req, res) => {
+  const userName = req.body.user_name || "Unknown";
+  const text = (req.body.text ? req.body.text.trim() : "");
+  const now = moment();
+  const date = now.format("MM/DD/YYYY");
+  const year = now.format("YYYY");
+  const outTime = text ? text : now.format("hh:mm A");
 
-// Verify Slack requests
-function verifySlackRequest(req, res, next) {
-  const sig = req.headers["x-slack-signature"];
-  const ts = req.headers["x-slack-request-timestamp"];
-  if (!sig || !ts) return res.status(400).send("Bad request");
-  if (Math.abs(Date.now() / 1000 - ts) > 60 * 5)
-    return res.status(400).send("Ignore this request (timestamp).");
+  await ensureYearSheet(year);
 
-  const hmac = crypto.createHmac("sha256", SLACK_SIGNING_SECRET);
-  const base = `v0:${ts}:${req.rawBody}`;
-  hmac.update(base);
-  const computed = hmac.digest("hex");
-  if (`v0=${computed}` !== sig) return res.status(400).send("Verification failed");
-  next();
-}
+  const userRow = await findUserRow(year, userName, date);
+  if (!userRow) {
+    res.send(`:x: You have not clocked in today!`);
+    return;
+  }
 
-// Helper to parse time input
-function parseTime(str) {
-  if (!str) return moment().tz("Asia/Manila").format("hh:mm A");
-  let m = moment(str, ["h:mm A", "h:mm", "HHmm", "HH:mm"], true);
-  if (!m.isValid()) return null;
-  return m.format("hh:mm A");
-}
+  // Get current values (to calculate total)
+  const resSheet = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${year}!A${userRow}:E${userRow}`
+  });
+  const row = resSheet.data.values[0];
+  const inTime = row[2];
 
-// SLASH COMMAND ENDPOINT
-app.post("/slack/command/:cmd", verifySlackRequest, (req, res) => {
-  const { user_id, user_name, command, text } = req.body;
-  const today = moment().tz("Asia/Manila").format("YYYY-MM-DD");
-  const nowTime = moment().tz("Asia/Manila").format("hh:mm A");
-  let resultMsg = "";
+  // Update clock out
+  await updateCell(year, userRow, 3, outTime);
 
-  // Always have a record list for this user
-  if (!attendanceRecords[user_id]) attendanceRecords[user_id] = [];
-
-  switch (req.params.cmd) {
-    case "clockin": {
-      let timeStr = text.trim();
-      let time = timeStr ? parseTime(timeStr) : nowTime;
-      if (!time) {
-        resultMsg = ":warning: Invalid time format! Use `7:30 AM`, `0730`, etc.";
-        break;
-      }
-      let record = attendanceRecords[user_id].find(r => r.date === today);
-      if (record && record.clockIn) {
-        resultMsg = `:warning: You already clocked in at *${record.clockIn}* today.`;
-      } else {
-        if (!record) {
-          record = { date: today };
-          attendanceRecords[user_id].push(record);
-        }
-        record.clockIn = time;
-        resultMsg = `:white_check_mark: *Clocked in!* Time: *${time}* (${today})`;
-      }
-      break;
-    }
-    case "clockout": {
-      let timeStr = text.trim();
-      let time = timeStr ? parseTime(timeStr) : nowTime;
-      if (!time) {
-        resultMsg = ":warning: Invalid time format! Use `5:30 PM` or `1730` etc.";
-        break;
-      }
-      let record = attendanceRecords[user_id].find(r => r.date === today);
-      if (!record || !record.clockIn) {
-        resultMsg = ":warning: You must clock in first today!";
-      } else if (record.clockOut) {
-        resultMsg = `:warning: You already clocked out at *${record.clockOut}* today.`;
-      } else {
-        record.clockOut = time;
-        resultMsg = `:white_check_mark: *Clocked out!* Time: *${time}* (${today})`;
-      }
-      break;
-    }
-    case "viewattendance": {
-      let out = "*Today's Attendance (Asia/Manila)*\n";
-      let any = false;
-      for (const [uid, recs] of Object.entries(attendanceRecords)) {
-        let r = recs.find(r => r.date === today);
-        if (r && (r.clockIn || r.clockOut)) {
-          any = true;
-          out += `• <@${uid}>: IN: *${r.clockIn || "-"}*, OUT: *${r.clockOut || "-"}*\n`;
-        }
-      }
-      resultMsg = any ? out : "_No attendance data for today yet._";
-      break;
-    }
-    case "manual": {
-      // /manual YYYY-MM-DD 7:30 AM 5:00 PM
-      let args = text.split(" ");
-      if (args.length < 3) {
-        resultMsg = ":information_source: Usage: `/manual YYYY-MM-DD 7:30 AM 5:00 PM`";
-        break;
-      }
-      let date = args[0];
-      let inTime = parseTime(args[1] + " " + (args[2] || ""));
-      let outTime = args.length >= 5 ? parseTime(args[3] + " " + (args[4] || "")) : null;
-      if (!moment(date, "YYYY-MM-DD", true).isValid()) {
-        resultMsg = ":warning: Invalid date! Use YYYY-MM-DD.";
-        break;
-      }
-      if (!inTime) {
-        resultMsg = ":warning: Invalid clock-in time!";
-        break;
-      }
-      let record = attendanceRecords[user_id].find(r => r.date === date);
-      if (!record) {
-        record = { date };
-        attendanceRecords[user_id].push(record);
-      }
-      record.clockIn = inTime;
-      if (outTime) record.clockOut = outTime;
-      resultMsg = `:white_check_mark: *Manual attendance set for ${date}.* IN: *${inTime}*${outTime ? `, OUT: *${outTime}*` : ""}`;
-      break;
-    }
-    case "manualedit": {
-      // /manualedit YYYY-MM-DD 8:00 AM 6:15 PM
-      let args = text.split(" ");
-      if (args.length < 3) {
-        resultMsg = ":information_source: Usage: `/manualedit YYYY-MM-DD 8:00 AM 6:15 PM`";
-        break;
-      }
-      let date = args[0];
-      let inTime = parseTime(args[1] + " " + (args[2] || ""));
-      let outTime = args.length >= 5 ? parseTime(args[3] + " " + (args[4] || "")) : null;
-      if (!moment(date, "YYYY-MM-DD", true).isValid()) {
-        resultMsg = ":warning: Invalid date! Use YYYY-MM-DD.";
-        break;
-      }
-      let record = attendanceRecords[user_id].find(r => r.date === date);
-      if (!record) {
-        resultMsg = `:warning: No record for that date. Use /manual to add it.`;
-        break;
-      }
-      if (inTime) record.clockIn = inTime;
-      if (outTime) record.clockOut = outTime;
-      resultMsg = `:white_check_mark: *Edited record for ${date}.* IN: *${record.clockIn}*${outTime ? `, OUT: *${record.clockOut}*` : ""}`;
-      break;
-    }
-    case "clear": {
-      if (ADMIN_USER_IDS.includes(user_id)) {
-        Object.keys(attendanceRecords).forEach(uid => {
-          attendanceRecords[uid] = [];
-        });
-        resultMsg = ":boom: *Cleared ALL attendance records!*";
-      } else {
-        attendanceRecords[user_id] = [];
-        resultMsg = ":white_check_mark: *Your attendance records have been cleared!*";
-      }
-      break;
-    }
-    case "help":
-    default: {
-      resultMsg =
-        "*CreoBot Attendance - Commands:*\n" +
-        "• `/clockin [7:30 AM]` — Clock in (now or specific time)\n" +
-        "• `/clockout [5:15 PM]` — Clock out (now or specific time)\n" +
-        "• `/viewattendance` — See today’s clock-in/out for everyone\n" +
-        "• `/manual YYYY-MM-DD IN OUT` — Manually set times for a date\n" +
-        "• `/manualedit YYYY-MM-DD IN OUT` — Edit an existing record\n" +
-        "• `/clear` — Clear your records (admin: clears all)\n" +
-        "• `/help` — Show this help message\n" +
-        "_Time zone: Asia/Manila_\n";
-      break;
+  // Calculate total hours
+  let total = "";
+  if (inTime && outTime) {
+    const inM = moment(inTime, ["h:mm A", "hh:mm A"]);
+    const outM = moment(outTime, ["h:mm A", "hh:mm A"]);
+    if (inM.isValid() && outM.isValid()) {
+      const diff = moment.duration(outM.diff(inM));
+      total = `${Math.floor(diff.asHours())}:${("0"+diff.minutes()).slice(-2)}`;
+      await updateCell(year, userRow, 4, total);
     }
   }
-  res.json({ response_type: "in_channel", text: resultMsg });
+
+  res.send(`:white_check_mark: Clocked out at *${outTime}* on ${date}. Total hours: ${total ? total : "N/A"}`);
 });
 
-app.get("/", (req, res) =>
-  res.send("CreoBot for Slack is running! 🚀")
-);
+// /viewattendance
+app.post("/slack/command/viewattendance", async (req, res) => {
+  const now = moment();
+  const date = now.format("MM/DD/YYYY");
+  const year = now.format("YYYY");
+  await ensureYearSheet(year);
+  const todayRows = await getAttendanceByDate(year, date);
 
+  if (todayRows.length <= 1) {
+    res.send("No attendance found for today.");
+    return;
+  }
+
+  let text = `*Attendance for ${date}:*\n`;
+  for (let i = 1; i < todayRows.length; i++) {
+    const row = todayRows[i];
+    text += `• ${row[0]} — In: ${row[2] || "-"}, Out: ${row[3] || "-"}, Total: ${row[4] || "-"}\n`;
+  }
+  res.send(text);
+});
+
+// /help
+app.post("/slack/command/help", (req, res) => {
+  res.send(
+    "*CreoBot Attendance - Commands:*\n" +
+    "`/clockin [time]` – Record your clock-in (default: now). Example: `/clockin 8:00 AM`\n" +
+    "`/clockout [time]` – Record your clock-out (default: now). Example: `/clockout 5:30 PM`\n" +
+    "`/viewattendance` – See all today's attendance records\n" +
+    "`/help` – This help message"
+  );
+});
+
+// ---- Basic Test/Health Endpoint ---- //
+app.get("/", (req, res) => {
+  res.send("CreoBot Attendance server running!");
+});
+
+// ---- Start server ---- //
 app.listen(PORT, () => {
-  console.log("Server running on port " + PORT);
+  console.log("Server running on port", PORT);
 });
