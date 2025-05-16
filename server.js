@@ -3,221 +3,229 @@ const bodyParser = require('body-parser');
 const { google } = require('googleapis');
 const fs = require('fs');
 const moment = require('moment-timezone');
-const axios = require('axios'); // <- Must be require, not import
 
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// === CONFIGURATION ===
-const SHEET_ID = '11pLzp9wpM6Acw4daxpf4c41SD24iQBVs6NQMxGy44Bs'; // Your Sheet ID
+// Set timezone to Asia/Manila (GMT+8)
 const TIMEZONE = 'Asia/Manila';
+const SPREADSHEET_ID = '11pLzp9wpM6Acw4daxpf4c41SD24iQBVs6NQMxGy44Bs'; // Your Google Sheet ID
 
-// === GOOGLE SHEETS AUTH ===
+// Load service account credentials
 const credentials = JSON.parse(fs.readFileSync('credentials.json'));
-const auth = new google.auth.JWT(
-  credentials.client_email,
-  null,
-  credentials.private_key,
-  ['https://www.googleapis.com/auth/spreadsheets']
-);
+
+// Authenticate with Google Sheets
+const auth = new google.auth.GoogleAuth({
+  credentials,
+  scopes: ['https://www.googleapis.com/auth/spreadsheets']
+});
 const sheets = google.sheets({ version: 'v4', auth });
 
-// === HELPERS ===
-function getSheetNameForYear(year) {
+// Utility: get sheet name (tab) by year
+function getSheetNameByYear(year) {
   return year.toString();
 }
 
-function formatDateMMDDYYYY(date) {
-  return moment(date).tz(TIMEZONE).format('MM/DD/YYYY');
-}
-
+// Utility: get today's Manila date in MM/DD/YYYY
 function getTodayDate() {
-  return formatDateMMDDYYYY(moment().tz(TIMEZONE));
+  return moment().tz(TIMEZONE).format('MM/DD/YYYY');
 }
 
-async function getSlackUserName(userId, slackToken) {
-  try {
-    const result = await axios.get('https://slack.com/api/users.info', {
-      params: { user: userId },
-      headers: { Authorization: `Bearer ${slackToken}` }
-    });
-    if (result.data && result.data.ok) {
-      // Try to get display name, real name, then username
-      return (
-        result.data.user.profile.display_name ||
-        result.data.user.real_name ||
-        result.data.user.name ||
-        'Unknown'
-      );
-    }
-  } catch (err) {
-    console.log('Error getting user info:', err.message);
-  }
-  return 'Unknown';
+// Utility: get today's year
+function getCurrentYear() {
+  return moment().tz(TIMEZONE).format('YYYY');
 }
 
-function computeTotalHours(inTime, outTime) {
+// Utility: get Manila time in HH:mm
+function getCurrentTime() {
+  return moment().tz(TIMEZONE).format('HH:mm');
+}
+
+// Utility: calculate hours (float, 2 decimals)
+function calculateTotalHours(inTime, outTime) {
   if (!inTime || !outTime) return 0;
-  const inMoment = moment(inTime, 'HH:mm');
-  const outMoment = moment(outTime, 'HH:mm');
-  let diff = outMoment.diff(inMoment, 'minutes');
-  if (diff < 0) diff += 24 * 60; // Overnight shift support
+  const format = "HH:mm";
+  const start = moment(inTime, format);
+  const end = moment(outTime, format);
+  let diff = end.diff(start, 'minutes');
+  if (diff < 0) diff += 24 * 60; // handle overnight
   return (diff / 60).toFixed(2);
 }
 
-// === GOOGLE SHEETS ROWS ===
-async function appendAttendanceRow({ sheet, row }) {
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: `${sheet}!A:E`,
-    valueInputOption: 'USER_ENTERED',
-    resource: { values: [row] }
-  });
-}
-
-async function getAttendanceRows(sheet, date) {
-  const { data } = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${sheet}!A:E`
-  });
-  const rows = (data.values || []).filter(
-    (row, idx) => idx !== 0 && row[1] === date // skip header
-  );
-  return rows;
-}
-
-// === SLACK SLASH COMMANDS ===
+// ========== SLACK COMMANDS ========== //
 
 // /clockin
 app.post('/slack/command/clockin', async (req, res) => {
-  const slackToken = process.env.SLACK_BOT_TOKEN;
-  const userId = req.body.user_id;
-  const userName = await getSlackUserName(userId, slackToken);
+  const name = req.body.user_name || "Unknown";
+  const date = getTodayDate();
+  const year = getCurrentYear();
+  const sheetName = getSheetNameByYear(year);
+  const clockIn = getCurrentTime();
 
-  let clockInTime = moment().tz(TIMEZONE).format('HH:mm');
-  const text = req.body.text ? req.body.text.trim() : '';
-  if (text) {
-    // Accepts either "07:30" or "07:30 AM"
-    let parsed = moment.tz(text, ['HH:mm', 'h:mm A'], true, TIMEZONE);
-    if (parsed.isValid()) {
-      clockInTime = parsed.format('HH:mm');
-    }
+  // Check if already clocked in for today
+  const getRows = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${sheetName}!A:E`
+  });
+
+  let updated = false;
+  let rowIndex = null;
+  let userRow = null;
+
+  if (getRows.data.values) {
+    getRows.data.values.forEach((row, i) => {
+      if (row[0] === name && row[1] === date) {
+        updated = true;
+        rowIndex = i + 1;
+        userRow = row;
+      }
+    });
   }
-  const today = getTodayDate();
-  const year = moment().tz(TIMEZONE).year();
-  const sheet = getSheetNameForYear(year);
 
-  await appendAttendanceRow({
-    sheet,
-    row: [userName, today, clockInTime, '', '']
-  });
-
-  res.json({
-    response_type: 'in_channel',
-    text: `Clocked in for *${userName}* at *${clockInTime}* on *${today}*`
-  });
+  if (updated) {
+    // Already clocked in today
+    return res.json({
+      response_type: "ephemeral",
+      text: `Already clocked in for ${name} at ${userRow[2]} on ${date}`
+    });
+  } else {
+    // Append new row: [Name, Date, Clock In, Clock Out, Total Hours]
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${sheetName}!A:E`,
+      valueInputOption: 'USER_ENTERED',
+      resource: {
+        values: [
+          [name, date, clockIn, '', '']
+        ]
+      }
+    });
+    return res.json({
+      response_type: "in_channel",
+      text: `Clocked in for ${name} at ${clockIn} on ${date}`
+    });
+  }
 });
 
 // /clockout
 app.post('/slack/command/clockout', async (req, res) => {
-  const slackToken = process.env.SLACK_BOT_TOKEN;
-  const userId = req.body.user_id;
-  const userName = await getSlackUserName(userId, slackToken);
+  const name = req.body.user_name || "Unknown";
+  const date = getTodayDate();
+  const year = getCurrentYear();
+  const sheetName = getSheetNameByYear(year);
+  const clockOut = getCurrentTime();
 
-  let clockOutTime = moment().tz(TIMEZONE).format('HH:mm');
-  const text = req.body.text ? req.body.text.trim() : '';
-  if (text) {
-    let parsed = moment.tz(text, ['HH:mm', 'h:mm A'], true, TIMEZONE);
-    if (parsed.isValid()) {
-      clockOutTime = parsed.format('HH:mm');
-    }
-  }
-  const today = getTodayDate();
-  const year = moment().tz(TIMEZONE).year();
-  const sheet = getSheetNameForYear(year);
-
-  // Read all rows for today, find the latest matching user without clock out
-  const { data } = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${sheet}!A:E`
+  // Fetch all rows for the year
+  const getRows = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${sheetName}!A:E`
   });
-  let updated = false;
-  const values = data.values || [];
-  for (let i = values.length - 1; i >= 1; i--) {
-    if (
-      values[i][0] === userName &&
-      values[i][1] === today &&
-      (!values[i][3] || values[i][3] === '')
-    ) {
-      // Update row with clock out and total hours
-      values[i][3] = clockOutTime;
-      values[i][4] = computeTotalHours(values[i][2], clockOutTime);
-      updated = true;
-      // Write back just this row
-      await sheets.spreadsheets.values.update({
-        spreadsheetId: SHEET_ID,
-        range: `${sheet}!A${i + 1}:E${i + 1}`,
-        valueInputOption: 'USER_ENTERED',
-        resource: { values: [values[i]] }
-      });
-      break;
+
+  let found = false;
+  let rowIndex = null;
+  let userRow = null;
+
+  if (getRows.data.values) {
+    getRows.data.values.forEach((row, i) => {
+      if (row[0] === name && row[1] === date) {
+        found = true;
+        rowIndex = i + 1;
+        userRow = row;
+      }
+    });
+  }
+
+  if (!found) {
+    return res.json({
+      response_type: "ephemeral",
+      text: `No clock-in found for ${name} today. Please /clockin first.`
+    });
+  }
+
+  // If already clocked out
+  if (userRow[3]) {
+    return res.json({
+      response_type: "ephemeral",
+      text: `Already clocked out for ${name} at ${userRow[3]} on ${date}`
+    });
+  }
+
+  // Update the row with clock out and total hours
+  const totalHours = calculateTotalHours(userRow[2], clockOut);
+
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${sheetName}!A${rowIndex}:E${rowIndex}`,
+    valueInputOption: 'USER_ENTERED',
+    resource: {
+      values: [
+        [name, date, userRow[2], clockOut, totalHours]
+      ]
     }
-  }
-  if (updated) {
-    res.json({
-      response_type: 'in_channel',
-      text: `Clocked out for *${userName}* at *${clockOutTime}* on *${today}*`
-    });
-  } else {
-    res.json({
-      response_type: 'ephemeral',
-      text: "Couldn't find today's clock-in for you. Please use /clockin first."
-    });
-  }
+  });
+
+  return res.json({
+    response_type: "in_channel",
+    text: `Clocked out for ${name} at ${clockOut} on ${date}. Total hours: ${totalHours}`
+  });
 });
 
 // /viewattendance
 app.post('/slack/command/viewattendance', async (req, res) => {
-  const year = moment().tz(TIMEZONE).year();
-  const sheet = getSheetNameForYear(year);
-  const today = getTodayDate();
+  const date = getTodayDate();
+  const year = getCurrentYear();
+  const sheetName = getSheetNameByYear(year);
 
-  const { data } = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${sheet}!A:E`
+  const getRows = await sheets.spreadsheets.values.get({
+    spreadsheetId: SPREADSHEET_ID,
+    range: `${sheetName}!A:E`
   });
-  const rows = (data.values || []).filter(
-    (row, idx) => idx !== 0 && row[1] === today
-  );
-  let table = 'Name | Clock In | Clock Out | Total Hours\n--- | --- | --- | ---\n';
-  rows.forEach(row => {
-    table += `${row[0] || ''} | ${row[2] || ''} | ${row[3] || ''} | ${row[4] || ''}\n`;
-  });
-  res.json({
-    response_type: 'in_channel',
-    text: `*Attendance for ${today}:*\n\`\`\`\n${table}\`\`\``
+
+  let table = `*Attendance for ${date}:*\n`;
+  table += `| Name | Clock In | Clock Out | Total Hours |\n`;
+  table += `| --- | --- | --- | --- |\n`;
+
+  let found = false;
+  if (getRows.data.values) {
+    getRows.data.values.forEach((row, i) => {
+      if (row[1] === date) {
+        found = true;
+        table += `| ${row[0]} | ${row[2] || ""} | ${row[3] || ""} | ${row[4] || ""} |\n`;
+      }
+    });
+  }
+
+  if (!found) {
+    table += "No attendance records found for today.";
+  }
+
+  return res.json({
+    response_type: "in_channel", // so everyone in the channel can see
+    text: table
   });
 });
 
 // /help
 app.post('/slack/command/help', (req, res) => {
-  res.json({
-    response_type: 'ephemeral',
-    text:
-      '*CreoBot Attendance – Commands:*\n' +
-      '• `/clockin [HH:MM or HH:MM AM/PM]` – Clock in (optional time)\n' +
-      '• `/clockout [HH:MM or HH:MM AM/PM]` – Clock out (optional time)\n' +
-      '• `/viewattendance` – View today’s attendance (everyone can see)\n' +
-      '• `/help` – Show this help message\n\n' +
-      '_Time zone: Asia/Manila (GMT+8)_.'
+  return res.json({
+    response_type: "ephemeral",
+    text: `
+*CreoBot Attendance Bot Commands:*
+- /clockin — Clock in for today
+- /clockout — Clock out for today
+- /viewattendance — View today's attendance for all
+- /help — Show this help message
+    `
   });
 });
 
-// ROOT
-app.get('/', (req, res) => res.send('CreoBot Attendance is running!'));
+// Home page for testing
+app.get('/', (req, res) => {
+  res.send('CreoBot Attendance Bot is running.');
+});
 
-// START
+// Glitch: listen on process.env.PORT
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-  console.log(`Server running on ${PORT}`);
+  console.log(`Server started on port ${PORT}`);
 });
