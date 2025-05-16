@@ -181,14 +181,14 @@ app.post('/slack/command/viewattendance', async (req, res) => {
     });
     return;
   }
-  // Build table (code block)
-  let table = "Name               | Clock In | Clock Out | Total Hours\n";
-  table += "-------------------|----------|-----------|------------\n";
+  // Adjusted widths for perfect alignment
+  let table = "Name                 | Clock In  | Clock Out  | Total Hours\n";
+  table +=    "---------------------|-----------|------------|------------\n";
   for (let i = 1; i < rows.length; i++) {
-    const name = (rows[i][0] || '').padEnd(19, ' ');
-    const clockIn = formatTime12hr(rows[i][2] || '').padEnd(8, ' ');
-    const clockOut = formatTime12hr(rows[i][3] || '').padEnd(9, ' ');
-    const total = (rows[i][4] || '').toString().padEnd(10, ' ');
+    const name     = (rows[i][0] || '').padEnd(21, ' ');
+    const clockIn  = formatTime12hr(rows[i][2] || '').padEnd(10, ' ');
+    const clockOut = formatTime12hr(rows[i][3] || '').padEnd(11, ' ');
+    const total    = (rows[i][4] || '').toString().padEnd(12, ' ');
     table += `${name}| ${clockIn}| ${clockOut}| ${total}\n`;
   }
   res.json({
