@@ -1,3 +1,4 @@
+// server.js
 const express = require("express");
 const bodyParser = require("body-parser");
 const fs = require("fs");
@@ -9,9 +10,10 @@ const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // ==== CONFIG ====
+// UPDATE THIS WITH YOUR GOOGLE SHEET ID!
 const SHEET_ID = "11pLzp9wpM6Acw4daxpf4c41SD24iQBVs6NQMxGy44Bs";
 const TIMEZONE = "Asia/Manila";
-const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "xoxb-...";
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "xoxb-..."; // Best to set in .env
 
 // Google Sheets Auth
 const creds = JSON.parse(fs.readFileSync("credentials.json", "utf8"));
@@ -20,70 +22,6 @@ const auth = new google.auth.GoogleAuth({
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 const sheets = google.sheets({ version: "v4", auth });
-
-// Helper Functions
-const { WebClient } = require("@slack/web-api");
-const slackWeb = new WebClient(SLACK_BOT_TOKEN);
-
-// Helper to get admin Slack user IDs
-async function getAdminSlackIds() {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: "Admins!A:A"
-  });
-  const adminEmails = (res.data.values || []).slice(1).map(row => (row[0] || "").toLowerCase().trim());
-  let adminIds = [];
-  for (const email of adminEmails) {
-    try {
-      const userResp = await slackWeb.users.lookupByEmail({ email });
-      if (userResp.ok && userResp.user && userResp.user.id) {
-        adminIds.push(userResp.user.id);
-      }
-    } catch (e) {}
-  }
-  return adminIds;
-}
-
-// Helper to ensure Requests sheet exists
-async function ensureRequestsSheet() {
-  const res = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
-  const exists = res.data.sheets.some(
-    (sheet) => sheet.properties.title === "Requests"
-  );
-  if (!exists) {
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: SHEET_ID,
-      requestBody: {
-        requests: [{ addSheet: { properties: { title: "Requests" } } }]
-      }
-    });
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `Requests!A1:H1`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: [[
-          "Type", "UserId", "Name", "Date", "Hours", "Reason", "Status", "RequestTime"
-        ]]
-      }
-    });
-  }
-}
-
-// Helper to log a request
-async function logRequest(type, userId, name, date, hours, reason) {
-  await ensureRequestsSheet();
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: "Requests!A:H",
-    valueInputOption: "USER_ENTERED",
-    requestBody: {
-      values: [[
-        type, userId, name, date, hours, reason, "PENDING", moment().tz(TIMEZONE).format("MM/DD/YYYY h:mm A")
-      ]]
-    }
-  });
-}
 
 // ==== UTILITIES ====
 
@@ -131,11 +69,11 @@ async function fetchSlackEmail(user_id) {
     }
     return null;
   } catch (e) {
-    console.error("Error fetching email:", e);
     return null;
   }
 }
 
+// SKIPS HEADER ROW!
 async function isAdmin(email) {
   try {
     const res = await sheets.spreadsheets.values.get({
@@ -143,7 +81,7 @@ async function isAdmin(email) {
       range: "Admins!A:A"
     });
     const adminEmails = (res.data.values || [])
-      .slice(1)
+      .slice(1) // skip header!
       .map(row => (row[0] || "").toLowerCase().trim());
     return adminEmails.includes((email || "").toLowerCase().trim());
   } catch (err) {
@@ -170,6 +108,7 @@ function calculateTotalHours(clockIn, clockOut) {
   const inTime = moment(clockIn, "hh:mm A");
   const outTime = moment(clockOut, "hh:mm A");
   if (!inTime.isValid() || !outTime.isValid()) return "";
+  // Standard: 8AM-5PM, lunch 12:00-1:00PM
   let breakMinutes = 0;
   const noon = moment("12:00 PM", "hh:mm A");
   const afterLunch = moment("1:00 PM", "hh:mm A");
@@ -211,6 +150,7 @@ async function ensureSheetExists(sheetName) {
         ]
       }
     });
+    // Add headers after creating sheet
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
       range: `${sheetName}!A1:G1`,
@@ -230,6 +170,7 @@ async function ensureSheetExists(sheetName) {
   }
 }
 
+// Prevent duplicate row for same user/date; always update instead of append
 async function upsertAttendance({ name, date, clockIn, clockOut }) {
   const year = moment(date, "MM/DD/YYYY").year().toString();
   await ensureSheetExists(year);
@@ -249,6 +190,7 @@ async function upsertAttendance({ name, date, clockIn, clockOut }) {
   if (clockIn && clockOut) totalHours = calculateTotalHours(clockIn, clockOut);
 
   if (rowIdx > 0) {
+    // Update
     const valuesToUpdate = [
       clockIn || rows[rowIdx][2] || "",
       clockOut || rows[rowIdx][3] || "",
@@ -265,6 +207,7 @@ async function upsertAttendance({ name, date, clockIn, clockOut }) {
       }
     });
   } else {
+    // Insert new
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
       range: `${year}!A:G`,
@@ -371,338 +314,6 @@ app.post("/slack/command/myattendance", async (req, res) => {
   res.json({ response_type: "ephemeral", text: table });
 });
 
-// /viewattendance — Show everyone's attendance for today (in_channel)
-app.post("/slack/command/viewattendance", async (req, res) => {
-  const today = moment().tz(TIMEZONE).format("MM/DD/YYYY");
-  const year = moment().tz(TIMEZONE).year().toString();
-  try {
-    await ensureSheetExists(year);
-    const result = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: `${year}!A:G`
-    });
-    const rows = result.data.values || [];
-    const todayRows = rows.filter((row, idx) => idx > 0 && row[1] === today);
-
-    if (todayRows.length === 0) {
-      return res.json({
-        response_type: "in_channel",
-        text: `No attendance records for today (${today}).`
-      });
-    }
-
-    // Compact, aligned table
-    let table = "```";
-    table += "Name         | In      | Out    | Total | OT | UT\n";
-    table += "-------------|---------|--------|-------|----|---\n";
-    todayRows.forEach(row => {
-      table += (row[0] || "").padEnd(12) + " | ";
-      table += (row[2] || "").padEnd(6) + " | ";
-      table += (row[3] || "").padEnd(6) + " | ";
-      table += (row[4] || "").padEnd(5) + " | ";
-      table += (row[5] || "").padEnd(2) + " | ";
-      table += (row[6] || "").padEnd(2) + "\n";
-    });
-    table += "```";
-
-    res.json({
-      response_type: "in_channel", // Show to everyone!
-      text: `*Attendance for ${today}:*\n${table}`
-    });
-  } catch (err) {
-    console.error("viewattendance error:", err);
-    return res.json({
-      response_type: "ephemeral",
-      text: "Error fetching attendance data. Please check that your Google Sheet has a tab for this year, is shared with your service account, and your Sheet ID is correct."
-    });
-  }
-});
-
-// /addovertime [employee name] MM/DD/YYYY hours [reason]
-app.post("/slack/command/addovertime", async (req, res) => {
-  const user_id = req.body.user_id;
-  const email = await fetchSlackEmail(user_id);
-  if (!await isAdmin(email)) {
-    return res.json({
-      response_type: "ephemeral",
-      text: "Only admins can use this command."
-    });
-  }
-  const args = req.body.text.trim().split(/\s+/);
-  if (args.length < 3) {
-    return res.json({
-      response_type: "ephemeral",
-      text: "Format: /addovertime [employee name] MM/DD/YYYY hours [reason]\nExample: /addovertime Lovelle 05/29/2024 2 End-of-month reporting"
-    });
-  }
-  const [empName, date, hours, ...reasonArr] = args;
-  const reason = reasonArr.join(" ") || "";
-  const year = moment(date, "MM/DD/YYYY").year().toString();
-  await ensureSheetExists(year);
-
-  // Find the row in the sheet
-  const result = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${year}!A:G`
-  });
-  const rows = result.data.values || [];
-  const rowIdx = rows.findIndex(
-    (row, idx) =>
-      idx > 0 &&
-      row[0] && row[0].toLowerCase() === empName.toLowerCase() &&
-      row[1] && row[1] === date
-  );
-
-  if (rowIdx > 0) {
-    // Update overtime hours and reason
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `${year}!F${rowIdx+1}`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: [[hours]] }
-    });
-    return res.json({
-      response_type: "in_channel",
-      text: `Overtime of ${hours} hour(s) added for ${empName} on ${date}. ${reason ? "Reason: " + reason : ""}`
-    });
-  } else {
-    return res.json({
-      response_type: "ephemeral",
-      text: `No attendance record found for ${empName} on ${date}. Please ensure the employee has clocked in/out first.`
-    });
-  }
-});
-
-// /addundertime [employee name] MM/DD/YYYY hours [reason]
-app.post("/slack/command/addundertime", async (req, res) => {
-  const user_id = req.body.user_id;
-  const email = await fetchSlackEmail(user_id);
-  if (!await isAdmin(email)) {
-    return res.json({
-      response_type: "ephemeral",
-      text: "Only admins can use this command."
-    });
-  }
-  const args = req.body.text.trim().split(/\s+/);
-  if (args.length < 3) {
-    return res.json({
-      response_type: "ephemeral",
-      text: "Format: /addundertime [employee name] MM/DD/YYYY hours [reason]\nExample: /addundertime Lovelle 05/29/2024 1 Left early for appointment"
-    });
-  }
-  const [empName, date, hours, ...reasonArr] = args;
-  const reason = reasonArr.join(" ") || "";
-  const year = moment(date, "MM/DD/YYYY").year().toString();
-  await ensureSheetExists(year);
-
-  // Find the row in the sheet
-  const result = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${year}!A:G`
-  });
-  const rows = result.data.values || [];
-  const rowIdx = rows.findIndex(
-    (row, idx) =>
-      idx > 0 &&
-      row[0] && row[0].toLowerCase() === empName.toLowerCase() &&
-      row[1] && row[1] === date
-  );
-
-  if (rowIdx > 0) {
-    // Update undertime hours and reason
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `${year}!G${rowIdx+1}`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: [[hours]] }
-    });
-    return res.json({
-      response_type: "in_channel",
-      text: `Undertime of ${hours} hour(s) added for ${empName} on ${date}. ${reason ? "Reason: " + reason : ""}`
-    });
-  } else {
-    return res.json({
-      response_type: "ephemeral",
-      text: `No attendance record found for ${empName} on ${date}. Please ensure the employee has clocked in/out first.`
-    });
-  }
-});
-
-// /overtime - command for employees
-app.post("/slack/command/overtime", async (req, res) => {
-  const user_id = req.body.user_id;
-  const name = await fetchSlackDisplayName(user_id);
-
-  const args = req.body.text.trim().split(/\s+/);
-  if (args.length < 3) {
-    return res.json({ response_type: "ephemeral", text: "Usage: /overtime MM/DD/YYYY hours reason" });
-  }
-  const [date, hours, ...reasonArr] = args;
-  const reason = reasonArr.join(" ");
-  await logRequest("overtime", user_id, name, date, hours, reason);
-
-  // DM all admins
-  const adminIds = await getAdminSlackIds();
-  for (const adminId of adminIds) {
-    await slackWeb.chat.postMessage({
-      channel: adminId,
-      text: `*Overtime Request*\nEmployee: *${name}*\nDate: *${date}*\nHours: *${hours}*\nReason: ${reason || "-"}\n`,
-      blocks: [
-        { type: "section", text: { type: "mrkdwn", text: `*Overtime Request*\n*Employee:* ${name}\n*Date:* ${date}\n*Hours:* ${hours}\n*Reason:* ${reason || "-"}` } },
-        {
-          type: "actions",
-          elements: [
-            {
-              type: "button",
-              text: { type: "plain_text", text: "Approve" },
-              style: "primary",
-              action_id: "approve_overtime",
-              value: JSON.stringify({ userId: user_id, name, date, hours, reason })
-            },
-            {
-              type: "button",
-              text: { type: "plain_text", text: "Deny" },
-              style: "danger",
-              action_id: "deny_overtime",
-              value: JSON.stringify({ userId: user_id, name, date, hours, reason })
-            }
-          ]
-        }
-      ]
-    });
-  }
-
-  res.json({
-    response_type: "ephemeral",
-    text: `Your overtime request for ${hours} hours on ${date} has been sent for approval.`
-  });
-});
-
-// /undertime - command for employees
-app.post("/slack/command/undertime", async (req, res) => {
-  const user_id = req.body.user_id;
-  const name = await fetchSlackDisplayName(user_id);
-
-  const args = req.body.text.trim().split(/\s+/);
-  if (args.length < 3) {
-    return res.json({ response_type: "ephemeral", text: "Usage: /undertime MM/DD/YYYY hours reason" });
-  }
-  const [date, hours, ...reasonArr] = args;
-  const reason = reasonArr.join(" ");
-  await logRequest("undertime", user_id, name, date, hours, reason);
-
-  // DM all admins
-  const adminIds = await getAdminSlackIds();
-  for (const adminId of adminIds) {
-    await slackWeb.chat.postMessage({
-      channel: adminId,
-      text: `*Undertime Request*\nEmployee: *${name}*\nDate: *${date}*\nHours: *${hours}*\nReason: ${reason || "-"}\n`,
-      blocks: [
-        { type: "section", text: { type: "mrkdwn", text: `*Undertime Request*\n*Employee:* ${name}\n*Date:* ${date}\n*Hours:* ${hours}\n*Reason:* ${reason || "-"}` } },
-        {
-          type: "actions",
-          elements: [
-            {
-              type: "button",
-              text: { type: "plain_text", text: "Approve" },
-              style: "primary",
-              action_id: "approve_undertime",
-              value: JSON.stringify({ userId: user_id, name, date, hours, reason })
-            },
-            {
-              type: "button",
-              text: { type: "plain_text", text: "Deny" },
-              style: "danger",
-              action_id: "deny_undertime",
-              value: JSON.stringify({ userId: user_id, name, date, hours, reason })
-            }
-          ]
-        }
-      ]
-    });
-  }
-
-  res.json({
-    response_type: "ephemeral",
-    text: `Your undertime request for ${hours} hours on ${date} has been sent for approval.`
-  });
-});
-
-// slack interactive actions handler
-app.post("/slack/actions", express.json(), async (req, res) => {
-  const payload = JSON.parse(req.body.payload);
-  const action = payload.actions[0];
-  const val = JSON.parse(action.value);
-  const type = action.action_id.includes("overtime") ? "overtime" : "undertime";
-  const approved = action.action_id.startsWith("approve");
-
-  // Update Requests sheet to APPROVED/DENIED
-  const requestsRes = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: "Requests!A:H"
-  });
-  const rows = requestsRes.data.values || [];
-  const rowIdx = rows.findIndex(row =>
-    row[0] === type &&
-    row[1] === val.userId &&
-    row[2] === val.name &&
-    row[3] === val.date &&
-    row[4] === val.hours &&
-    row[5] === val.reason &&
-    row[6] === "PENDING"
-  );
-  if (rowIdx > 0) {
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `Requests!G${rowIdx + 1}`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: [[approved ? "APPROVED" : "DENIED"]] }
-    });
-
-    // If approved, update attendance sheet
-    if (approved) {
-      const year = moment(val.date, "MM/DD/YYYY").year().toString();
-      await ensureSheetExists(year);
-      const attRes = await sheets.spreadsheets.values.get({
-        spreadsheetId: SHEET_ID,
-        range: `${year}!A:G`
-      });
-      const attRows = attRes.data.values || [];
-      const attIdx = attRows.findIndex(
-        (row, idx) =>
-          idx > 0 &&
-          row[0] && row[0].toLowerCase() === val.name.toLowerCase() &&
-          row[1] && row[1] === val.date
-      );
-      if (attIdx > 0) {
-        // Overtime is column F, Undertime is column G
-        await sheets.spreadsheets.values.update({
-          spreadsheetId: SHEET_ID,
-          range: `${year}!${type === "overtime" ? "F" : "G"}${attIdx + 1}`,
-          valueInputOption: "USER_ENTERED",
-          requestBody: { values: [[val.hours]] }
-        });
-      }
-    }
-
-    // Notify employee via DM
-    await slackWeb.chat.postMessage({
-      channel: val.userId,
-      text: approved
-        ? `✅ Your ${type} request for ${val.hours} hours on ${val.date} has been *approved* by an admin.`
-        : `❌ Your ${type} request for ${val.hours} hours on ${val.date} has been *denied* by an admin.`
-    });
-
-    // Notify admin in the thread
-    res.json({
-      text: approved ? "Approved ✅" : "Denied ❌",
-      replace_original: true
-    });
-  } else {
-    res.json({ text: "This request was already processed." });
-  }
-});
-
 // /help (shows all commands for admin, basic for employee)
 app.post("/slack/command/help", async (req, res) => {
   const user_id = req.body.user_id;
@@ -712,10 +323,9 @@ app.post("/slack/command/help", async (req, res) => {
   try {
     email = await fetchSlackEmail(user_id);
     admin = await isAdmin(email);
-    console.log("HELP command user:", email, "ADMIN?", admin); // Debug log
   } catch (err) {
     return res.json({
-      response_type: "in_channel",
+      response_type: "ephemeral",
       text: "⚠️ Bot error: Could not check admin status. Please check your Google Sheet's Admins tab exists and is shared properly."
     });
   }
@@ -726,8 +336,6 @@ app.post("/slack/command/help", async (req, res) => {
     "• `/clockout [h:mm AM/PM]` — Clock out (optional time).\n" +
     "• `/myattendance [date|range]` — See your attendance.\n" +
     "• `/viewattendance` — Show today’s attendance table for everyone.\n" +
-    "• `/addovertime [employee name] MM/DD/YYYY hours [reason]` — (Admin) Add overtime to an employee.\n" +
-    "• `/addundertime [employee name] MM/DD/YYYY hours [reason]` — (Admin) Add undertime to an employee.\n" +
     "• Overtime and undertime requests are approved by admin.\n";
 
   if (admin) {
@@ -741,9 +349,10 @@ app.post("/slack/command/help", async (req, res) => {
       "• `/addadmin email` — Add admin.\n" +
       "• `/removeadmin email` — Remove admin.\n";
   }
-
-  res.json({ response_type: "in_channel", text });
+  res.json({ response_type: "ephemeral", text });
 });
+
+// Add more command endpoints (viewattendance, admin, approval, etc.) following this pattern!
 
 app.get("/", (req, res) => {
   res.send("Attendance Bot running!");
