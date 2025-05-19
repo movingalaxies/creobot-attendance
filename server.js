@@ -1,3 +1,6 @@
+// Required dependencies:
+// npm install express body-parser googleapis moment moment-timezone axios
+
 const express = require("express");
 const bodyParser = require("body-parser");
 const fs = require("fs");
@@ -8,28 +11,20 @@ const axios = require("axios");
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Replace with your actual values:
-const SHEET_ID = "11pLzp9wpM6Acw4daxpf4c41SD24iQBVs6NQMxGy44Bs";
+// Configuration
+const SHEET_ID = "YOUR_GOOGLE_SHEET_ID_HERE"; // <-- CHANGE THIS!
 const TIMEZONE = "Asia/Manila";
-const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "xoxb-..."; // Put your bot token in .env or here
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "xoxb-..."; // use .env for security
 
+// Google Sheets Auth
 const creds = JSON.parse(fs.readFileSync("credentials.json", "utf8"));
-
 const auth = new google.auth.GoogleAuth({
   credentials: creds,
   scopes: ["https://www.googleapis.com/auth/spreadsheets"],
 });
 const sheets = google.sheets({ version: "v4", auth });
 
-const HEADERS = [
-  "Name of Employee",
-  "Date",
-  "Clock In",
-  "Clock Out",
-  "Total Hours"
-];
-
-// ---- UTILITY FUNCTIONS ----
+// --- Utility Functions ---
 
 async function fetchSlackDisplayName(user_id) {
   try {
@@ -43,9 +38,13 @@ async function fetchSlackDisplayName(user_id) {
       resp.data.user.profile &&
       resp.data.user.profile.display_name
     ) {
-      return resp.data.user.profile.display_name || resp.data.user.real_name || resp.data.user.name || "Unknown";
+      return (
+        resp.data.user.profile.display_name ||
+        resp.data.user.real_name ||
+        resp.data.user.name ||
+        "Unknown"
+      );
     }
-    // fallback: try real_name
     if (resp.data.user && resp.data.user.real_name) {
       return resp.data.user.real_name;
     }
@@ -55,108 +54,25 @@ async function fetchSlackDisplayName(user_id) {
   }
 }
 
-function formatTime(time) {
-  if (!time) return "";
-  return moment(time, "hh:mm A").format("h:mm A");
-}
-
-function calculateTotalHours(clockIn, clockOut) {
-  if (!clockIn || !clockOut) return "";
-  const inTime = moment(clockIn, "hh:mm A");
-  const outTime = moment(clockOut, "hh:mm A");
-  if (!inTime.isValid() || !outTime.isValid()) return "";
-
-  // Deduct lunch break if range overlaps 12:00-1:00PM
-  let breakMinutes = 0;
-  const noon = moment("12:00 PM", "hh:mm A");
-  const afterLunch = moment("1:00 PM", "hh:mm A");
-  if (inTime.isBefore(afterLunch) && outTime.isAfter(noon)) {
-    breakMinutes = 60;
-  }
-
-  let duration = outTime.diff(inTime, "minutes") - breakMinutes;
-  if (duration < 0) duration = 0;
-  const hours = Math.floor(duration / 60);
-  const minutes = duration % 60;
-  return `${hours.toString().padStart(2,"0")}:${minutes.toString().padStart(2,"0")}`;
-}
-
-// ---- GOOGLE SHEETS HANDLING ----
-
-async function ensureSheetExists(sheetName) {
-  const res = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
-  const exists = res.data.sheets.some(
-    (sheet) => sheet.properties.title === sheetName
-  );
-  if (!exists) {
-    await sheets.spreadsheets.batchUpdate({
-      spreadsheetId: SHEET_ID,
-      requestBody: {
-        requests: [
-          { addSheet: { properties: { title: sheetName } } },
-          {
-            updateCells: {
-              rows: [
-                { values: HEADERS.map(h => ({ userEnteredValue: { stringValue: h } })) }
-              ],
-              fields: "*",
-              start: { sheetId: res.data.sheets.length, rowIndex: 0, columnIndex: 0 }
-            }
-          }
-        ]
-      }
+async function fetchSlackEmail(user_id) {
+  try {
+    const resp = await axios.get("https://slack.com/api/users.info", {
+      params: { user: user_id },
+      headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}` }
     });
+    if (
+      resp.data &&
+      resp.data.user &&
+      resp.data.user.profile &&
+      resp.data.user.profile.email
+    ) {
+      return resp.data.user.profile.email;
+    }
+    return null;
+  } catch (e) {
+    return null;
   }
 }
-
-async function addAttendance({ name, date, clockIn }) {
-  const year = moment(date, "MM/DD/YYYY").year().toString();
-  await ensureSheetExists(year);
-  await sheets.spreadsheets.values.append({
-    spreadsheetId: SHEET_ID,
-    range: `${year}!A:E`,
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: [[name, date, clockIn, "", ""]] }
-  });
-}
-
-async function updateClockOut({ name, date, clockOut }) {
-  const year = moment(date, "MM/DD/YYYY").year().toString();
-  await ensureSheetExists(year);
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${year}!A:E`
-  });
-  const rows = res.data.values || [];
-  const rowIdx = rows.findIndex(
-    (row) =>
-      row[0] && row[0].toLowerCase() === name.toLowerCase() &&
-      row[1] && row[1] === date
-  );
-  if (rowIdx < 1) throw new Error("No clock-in record found for today.");
-  const clockIn = rows[rowIdx][2];
-  const total = calculateTotalHours(clockIn, clockOut);
-
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SHEET_ID,
-    range: `${year}!D${rowIdx + 1}:E${rowIdx + 1}`,
-    valueInputOption: "USER_ENTERED",
-    requestBody: { values: [[clockOut, total]] }
-  });
-}
-
-async function getTodayAttendance(date) {
-  const year = moment(date, "MM/DD/YYYY").year().toString();
-  await ensureSheetExists(year);
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${year}!A:E`
-  });
-  const rows = res.data.values || [];
-  return rows.filter((row, idx) => idx === 0 || row[1] === date);
-}
-
-// ---- SLACK COMMAND HANDLERS ----
 
 function getCustomTime(text) {
   if (!text) return null;
@@ -171,134 +87,264 @@ function getCustomTime(text) {
   return null;
 }
 
-// --- /clockin ---
+function calculateTotalHours(clockIn, clockOut) {
+  if (!clockIn || !clockOut) return "";
+  const inTime = moment(clockIn, "hh:mm A");
+  const outTime = moment(clockOut, "hh:mm A");
+  if (!inTime.isValid() || !outTime.isValid()) return "";
+  // Standard: 8AM-5PM, lunch 12:00-1:00PM
+  let breakMinutes = 0;
+  const noon = moment("12:00 PM", "hh:mm A");
+  const afterLunch = moment("1:00 PM", "hh:mm A");
+  if (inTime.isBefore(afterLunch) && outTime.isAfter(noon)) {
+    breakMinutes = 60;
+  }
+  let duration = outTime.diff(inTime, "minutes") - breakMinutes;
+  if (duration < 0) duration = 0;
+  const hours = Math.floor(duration / 60);
+  const minutes = duration % 60;
+  return `${hours.toString().padStart(2,"0")}:${minutes.toString().padStart(2,"0")}`;
+}
+
+function parseDateRange(arg) {
+  // Example: "05/20/2024-05/22/2024"
+  if (!arg) return { start: null, end: null };
+  const parts = arg.split("-");
+  if (parts.length === 2) {
+    return {
+      start: moment(parts[0], "MM/DD/YYYY"),
+      end: moment(parts[1], "MM/DD/YYYY")
+    };
+  } else {
+    const date = moment(arg, "MM/DD/YYYY");
+    return { start: date, end: date };
+  }
+}
+
+// --- Google Sheets Functions ---
+
+async function ensureSheetExists(sheetName) {
+  const res = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  const exists = res.data.sheets.some(
+    (sheet) => sheet.properties.title === sheetName
+  );
+  if (!exists) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      requestBody: {
+        requests: [
+          { addSheet: { properties: { title: sheetName } } }
+        ]
+      }
+    });
+    // Add headers after creating sheet
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${sheetName}!A1:G1`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [[
+          "Name of Employee",
+          "Date",
+          "Clock In",
+          "Clock Out",
+          "Total Hours",
+          "Overtime Hours",
+          "Undertime Hours"
+        ]]
+      }
+    });
+  }
+}
+
+async function isAdmin(email) {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: "Admins!A:A"
+  });
+  const adminEmails = (res.data.values || []).map(row => row[0].toLowerCase());
+  return adminEmails.includes(email.toLowerCase());
+}
+
+// Prevent duplicate row for same user/date; always update instead of append
+async function upsertAttendance({ name, date, clockIn, clockOut }) {
+  const year = moment(date, "MM/DD/YYYY").year().toString();
+  await ensureSheetExists(year);
+
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: `${year}!A:G`
+  });
+  const rows = res.data.values || [];
+  const rowIdx = rows.findIndex(
+    (row, idx) =>
+      idx > 0 &&
+      row[0] && row[0].toLowerCase() === name.toLowerCase() &&
+      row[1] && row[1] === date
+  );
+  let totalHours = "";
+  if (clockIn && clockOut) totalHours = calculateTotalHours(clockIn, clockOut);
+
+  if (rowIdx > 0) {
+    // Update
+    const valuesToUpdate = [
+      clockIn || rows[rowIdx][2] || "",
+      clockOut || rows[rowIdx][3] || "",
+      totalHours || rows[rowIdx][4] || "",
+      rows[rowIdx][5] || "",
+      rows[rowIdx][6] || ""
+    ];
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `${year}!C${rowIdx+1}:G${rowIdx+1}`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [valuesToUpdate]
+      }
+    });
+  } else {
+    // Insert new
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SHEET_ID,
+      range: `${year}!A:G`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [[name, date, clockIn || "", clockOut || "", totalHours, "", ""]]
+      }
+    });
+  }
+}
+
+async function getAttendance(name, startDate, endDate) {
+  let results = [];
+  let cur = moment(startDate);
+  while (cur.isSameOrBefore(endDate, "day")) {
+    const year = cur.year().toString();
+    await ensureSheetExists(year);
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${year}!A:G`
+    });
+    const rows = res.data.values || [];
+    // Find all matching rows (for each date in range)
+    results = results.concat(
+      rows.filter((row, idx) =>
+        idx > 0 &&
+        row[0] && row[0].toLowerCase() === name.toLowerCase() &&
+        row[1] && row[1] === cur.format("MM/DD/YYYY")
+      )
+    );
+    cur.add(1, "day");
+  }
+  return results;
+}
+
+// --- Slack Command Handlers ---
+
+// /clockin
 app.post("/slack/command/clockin", async (req, res) => {
   const user_id = req.body.user_id;
   const date = moment().tz(TIMEZONE).format("MM/DD/YYYY");
   let clockIn = moment().tz(TIMEZONE).format("h:mm A");
-
-  // Allow optional custom time
   if (req.body.text) {
     const custom = getCustomTime(req.body.text);
-    if (custom) {
-      clockIn = custom;
-    } else {
-      return res.json({
-        response_type: "ephemeral",
-        text: "Please enter time as `h:mm AM/PM` (example: 7:30 AM)"
-      });
-    }
+    if (custom) clockIn = custom;
+    else return res.json({ response_type: "ephemeral", text: "Please enter time as `h:mm AM/PM` (example: 7:30 AM)" });
   }
-
-  let name = await fetchSlackDisplayName(user_id);
-
-  try {
-    await addAttendance({ name, date, clockIn });
-    res.json({
-      response_type: "ephemeral",
-      text: `✅ Clocked in as *${name}* at *${clockIn}* on ${date}.`
-    });
-  } catch (err) {
-    res.json({
-      response_type: "ephemeral",
-      text: `Error: ${err.message}`
-    });
-  }
+  const name = await fetchSlackDisplayName(user_id);
+  await upsertAttendance({ name, date, clockIn, clockOut: null });
+  res.json({
+    response_type: "ephemeral",
+    text: `✅ Clocked in as *${name}* at *${clockIn}* on ${date}.`
+  });
 });
 
-// --- /clockout ---
+// /clockout
 app.post("/slack/command/clockout", async (req, res) => {
   const user_id = req.body.user_id;
   const date = moment().tz(TIMEZONE).format("MM/DD/YYYY");
   let clockOut = moment().tz(TIMEZONE).format("h:mm A");
-
   if (req.body.text) {
     const custom = getCustomTime(req.body.text);
-    if (custom) {
-      clockOut = custom;
-    } else {
-      return res.json({
-        response_type: "ephemeral",
-        text: "Please enter time as `h:mm AM/PM` (example: 4:30 PM)"
-      });
-    }
+    if (custom) clockOut = custom;
+    else return res.json({ response_type: "ephemeral", text: "Please enter time as `h:mm AM/PM` (example: 5:00 PM)" });
   }
-
-  let name = await fetchSlackDisplayName(user_id);
-
-  try {
-    await updateClockOut({ name, date, clockOut });
-    res.json({
-      response_type: "ephemeral",
-      text: `✅ Clocked out as *${name}* at *${clockOut}* on ${date}.`
-    });
-  } catch (err) {
-    res.json({
-      response_type: "ephemeral",
-      text: `Error: ${err.message}`
-    });
-  }
-});
-
-// --- /viewattendance (in_channel) ---
-app.post("/slack/command/viewattendance", async (req, res) => {
-  const date = moment().tz(TIMEZONE).format("MM/DD/YYYY");
-  try {
-    const records = await getTodayAttendance(date);
-    let table = "";
-    if (records.length > 1) {
-      const colWidths = [18, 10, 10, 12];
-      table +=
-        "Name".padEnd(colWidths[0]) +
-        "| Clock In ".padEnd(colWidths[1]) +
-        "| Clock Out ".padEnd(colWidths[2]) +
-        "| Total Hours\n";
-      table +=
-        "-".repeat(colWidths[0]) +
-        "|-" + "-".repeat(colWidths[1] - 1) +
-        "|-" + "-".repeat(colWidths[2] - 1) +
-        "|-" + "-".repeat(colWidths[3] - 1) + "\n";
-      for (let i = 1; i < records.length; i++) {
-        const row = records[i];
-        table +=
-          (row[0] || "").padEnd(colWidths[0]) +
-          "| " +
-          (row[2] || "").padEnd(colWidths[1] - 1) +
-          "| " +
-          (row[3] || "").padEnd(colWidths[2] - 1) +
-          "| " +
-          (row[4] || "").padEnd(colWidths[3] - 1) +
-          "\n";
-      }
-    } else {
-      table = "No attendance records found for today.";
-    }
-    res.json({
-      response_type: "in_channel",
-      text: "```" + table + "```"
-    });
-  } catch (err) {
-    res.json({
-      response_type: "in_channel",
-      text: `Error: ${err.message}`
-    });
-  }
-});
-
-// --- /help (in_channel) ---
-app.post("/slack/command/help", (req, res) => {
+  const name = await fetchSlackDisplayName(user_id);
+  await upsertAttendance({ name, date, clockIn: null, clockOut });
   res.json({
-    response_type: "in_channel",
-    text:
-      "*Attendance Bot Help*\n" +
-      "• `/clockin [h:mm AM/PM]` - Clock in for the day (optional time argument).\n" +
-      "• `/clockout [h:mm AM/PM]` - Clock out for the day (optional time argument).\n" +
-      "• `/viewattendance` - View today's attendance table for everyone.\n" +
-      "Lunch break of 1 hour (12:00 PM - 1:00 PM) is automatically deducted from total hours."
+    response_type: "ephemeral",
+    text: `✅ Clocked out as *${name}* at *${clockOut}* on ${date}.`
   });
 });
 
-// Root
+// /myattendance [date or range]
+app.post("/slack/command/myattendance", async (req, res) => {
+  const user_id = req.body.user_id;
+  const name = await fetchSlackDisplayName(user_id);
+  let start, end;
+  if (req.body.text && req.body.text.trim()) {
+    const { start: s, end: e } = parseDateRange(req.body.text.trim());
+    start = s;
+    end = e;
+  } else {
+    start = end = moment().tz(TIMEZONE);
+  }
+  if (!start || !end) {
+    return res.json({ response_type: "ephemeral", text: "Please provide a date or range (MM/DD/YYYY or MM/DD/YYYY-MM/DD/YYYY)" });
+  }
+  const rows = await getAttendance(name, start, end);
+  if (rows.length === 0) {
+    return res.json({ response_type: "ephemeral", text: "No attendance records found for that period." });
+  }
+  // Format table
+  let table = "```";
+  table += "Date       | In      | Out     | Total   | OT    | UT\n";
+  table += "-----------|---------|---------|---------|-------|-------\n";
+  rows.forEach(r => {
+    table += (r[1] || "").padEnd(11) + "| ";
+    table += (r[2] || "").padEnd(8) + "| ";
+    table += (r[3] || "").padEnd(8) + "| ";
+    table += (r[4] || "").padEnd(8) + "| ";
+    table += (r[5] || "").padEnd(5) + "| ";
+    table += (r[6] || "").padEnd(5) + "\n";
+  });
+  table += "```";
+  res.json({ response_type: "ephemeral", text: table });
+});
+
+// /help (shows all commands for admin, basic for employee)
+app.post("/slack/command/help", async (req, res) => {
+  const user_id = req.body.user_id;
+  const email = await fetchSlackEmail(user_id);
+  const admin = await isAdmin(email);
+
+  let text =
+    "*Creo Attendance Bot — Help*\n\n" +
+    "• `/clockin [h:mm AM/PM]` — Clock in (optional time).\n" +
+    "• `/clockout [h:mm AM/PM]` — Clock out (optional time).\n" +
+    "• `/myattendance [date|range]` — See your attendance.\n" +
+    "• `/viewattendance` — Show today’s attendance table for everyone.\n" +
+    "• Overtime and undertime requests are approved by admin.\n";
+
+  if (admin) {
+    text +=
+      "\n*Admin Commands:*\n" +
+      "• `/editattendance @user MM/DD/YYYY IN OUT` — Edit a user’s record.\n" +
+      "• `/approve` — Approve pending overtime/undertime requests.\n" +
+      "• `/addovertime @user MM/DD/YYYY [hours]` — Add overtime.\n" +
+      "• `/addundertime @user MM/DD/YYYY [hours]` — Add undertime.\n" +
+      "• `/history @user [date|range]` — Get user attendance history.\n" +
+      "• `/addadmin email` — Add admin.\n" +
+      "• `/removeadmin email` — Remove admin.\n";
+  }
+  res.json({ response_type: admin ? "ephemeral" : "ephemeral", text });
+});
+
+// (More commands: admin-only /editattendance, overtime/undertime requests, admin workflow...)
+
+// --- Add the rest of the admin commands, overtime/undertime approval workflow, and DM logic here! ---
+// (For brevity, you can ask for these chunks one by one — or I can send the entire extended bot code if you want everything at once!)
+
 app.get("/", (req, res) => {
   res.send("Attendance Bot running!");
 });
