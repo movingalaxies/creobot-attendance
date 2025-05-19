@@ -1,6 +1,4 @@
-// Required dependencies:
-// npm install express body-parser googleapis moment moment-timezone axios
-
+// server.js
 const express = require("express");
 const bodyParser = require("body-parser");
 const fs = require("fs");
@@ -11,10 +9,11 @@ const axios = require("axios");
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
 
-// Configuration
-const SHEET_ID = "YOUR_GOOGLE_SHEET_ID_HERE"; // <-- CHANGE THIS!
+// ==== CONFIG ====
+// UPDATE THIS WITH YOUR GOOGLE SHEET ID!
+const SHEET_ID = "11pLzp9wpM6Acw4daxpf4c41SD24iQBVs6NQMxGy44Bs";
 const TIMEZONE = "Asia/Manila";
-const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "xoxb-..."; // use .env for security
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "xoxb-..."; // Best to set in .env
 
 // Google Sheets Auth
 const creds = JSON.parse(fs.readFileSync("credentials.json", "utf8"));
@@ -24,7 +23,7 @@ const auth = new google.auth.GoogleAuth({
 });
 const sheets = google.sheets({ version: "v4", auth });
 
-// --- Utility Functions ---
+// ==== UTILITIES ====
 
 async function fetchSlackDisplayName(user_id) {
   try {
@@ -74,6 +73,23 @@ async function fetchSlackEmail(user_id) {
   }
 }
 
+// SKIPS HEADER ROW!
+async function isAdmin(email) {
+  try {
+    const res = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: "Admins!A:A"
+    });
+    const adminEmails = (res.data.values || [])
+      .slice(1) // skip header!
+      .map(row => (row[0] || "").toLowerCase().trim());
+    return adminEmails.includes((email || "").toLowerCase().trim());
+  } catch (err) {
+    console.error("Error checking admin:", err);
+    return false;
+  }
+}
+
 function getCustomTime(text) {
   if (!text) return null;
   let inputTime = text.trim();
@@ -107,7 +123,6 @@ function calculateTotalHours(clockIn, clockOut) {
 }
 
 function parseDateRange(arg) {
-  // Example: "05/20/2024-05/22/2024"
   if (!arg) return { start: null, end: null };
   const parts = arg.split("-");
   if (parts.length === 2) {
@@ -120,8 +135,6 @@ function parseDateRange(arg) {
     return { start: date, end: date };
   }
 }
-
-// --- Google Sheets Functions ---
 
 async function ensureSheetExists(sheetName) {
   const res = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
@@ -155,15 +168,6 @@ async function ensureSheetExists(sheetName) {
       }
     });
   }
-}
-
-async function isAdmin(email) {
-  const res = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: "Admins!A:A"
-  });
-  const adminEmails = (res.data.values || []).map(row => row[0].toLowerCase());
-  return adminEmails.includes(email.toLowerCase());
 }
 
 // Prevent duplicate row for same user/date; always update instead of append
@@ -226,7 +230,6 @@ async function getAttendance(name, startDate, endDate) {
       range: `${year}!A:G`
     });
     const rows = res.data.values || [];
-    // Find all matching rows (for each date in range)
     results = results.concat(
       rows.filter((row, idx) =>
         idx > 0 &&
@@ -239,7 +242,7 @@ async function getAttendance(name, startDate, endDate) {
   return results;
 }
 
-// --- Slack Command Handlers ---
+// ==== SLACK COMMAND ENDPOINTS ====
 
 // /clockin
 app.post("/slack/command/clockin", async (req, res) => {
@@ -296,7 +299,6 @@ app.post("/slack/command/myattendance", async (req, res) => {
   if (rows.length === 0) {
     return res.json({ response_type: "ephemeral", text: "No attendance records found for that period." });
   }
-  // Format table
   let table = "```";
   table += "Date       | In      | Out     | Total   | OT    | UT\n";
   table += "-----------|---------|---------|---------|-------|-------\n";
@@ -315,8 +317,18 @@ app.post("/slack/command/myattendance", async (req, res) => {
 // /help (shows all commands for admin, basic for employee)
 app.post("/slack/command/help", async (req, res) => {
   const user_id = req.body.user_id;
-  const email = await fetchSlackEmail(user_id);
-  const admin = await isAdmin(email);
+  let email = "";
+  let admin = false;
+
+  try {
+    email = await fetchSlackEmail(user_id);
+    admin = await isAdmin(email);
+  } catch (err) {
+    return res.json({
+      response_type: "ephemeral",
+      text: "⚠️ Bot error: Could not check admin status. Please check your Google Sheet's Admins tab exists and is shared properly."
+    });
+  }
 
   let text =
     "*Creo Attendance Bot — Help*\n\n" +
@@ -337,13 +349,10 @@ app.post("/slack/command/help", async (req, res) => {
       "• `/addadmin email` — Add admin.\n" +
       "• `/removeadmin email` — Remove admin.\n";
   }
-  res.json({ response_type: admin ? "ephemeral" : "ephemeral", text });
+  res.json({ response_type: "ephemeral", text });
 });
 
-// (More commands: admin-only /editattendance, overtime/undertime requests, admin workflow...)
-
-// --- Add the rest of the admin commands, overtime/undertime approval workflow, and DM logic here! ---
-// (For brevity, you can ask for these chunks one by one — or I can send the entire extended bot code if you want everything at once!)
+// Add more command endpoints (viewattendance, admin, approval, etc.) following this pattern!
 
 app.get("/", (req, res) => {
   res.send("Attendance Bot running!");
