@@ -364,9 +364,10 @@ app.post("/slack/command/help", async (req, res) => {
   try {
     email = await fetchSlackEmail(user_id);
     admin = await isAdmin(email);
+    console.log("HELP command user:", email, "ADMIN?", admin); // Add this for debugging
   } catch (err) {
     return res.json({
-      response_type: "ephemeral",
+      response_type: "in_channel",
       text: "⚠️ Bot error: Could not check admin status. Please check your Google Sheet's Admins tab exists and is shared properly."
     });
   }
@@ -390,7 +391,8 @@ app.post("/slack/command/help", async (req, res) => {
       "• `/addadmin email` — Add admin.\n" +
       "• `/removeadmin email` — Remove admin.\n";
   }
-  res.json({ response_type: "ephemeral", text });
+
+  res.json({ response_type: "in_channel", text });
 });
 
 app.get("/", (req, res) => {
