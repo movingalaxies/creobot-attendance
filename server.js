@@ -528,6 +528,181 @@ app.post("/slack/command/addundertime", async (req, res) => {
   }
 });
 
+// /overtime - command for employees
+app.post("/slack/command/overtime", async (req, res) => {
+  const user_id = req.body.user_id;
+  const name = await fetchSlackDisplayName(user_id);
+
+  const args = req.body.text.trim().split(/\s+/);
+  if (args.length < 3) {
+    return res.json({ response_type: "ephemeral", text: "Usage: /overtime MM/DD/YYYY hours reason" });
+  }
+  const [date, hours, ...reasonArr] = args;
+  const reason = reasonArr.join(" ");
+  await logRequest("overtime", user_id, name, date, hours, reason);
+
+  // DM all admins
+  const adminIds = await getAdminSlackIds();
+  for (const adminId of adminIds) {
+    await slackWeb.chat.postMessage({
+      channel: adminId,
+      text: `*Overtime Request*\nEmployee: *${name}*\nDate: *${date}*\nHours: *${hours}*\nReason: ${reason || "-"}\n`,
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text: `*Overtime Request*\n*Employee:* ${name}\n*Date:* ${date}\n*Hours:* ${hours}\n*Reason:* ${reason || "-"}` } },
+        {
+          type: "actions",
+          elements: [
+            {
+              type: "button",
+              text: { type: "plain_text", text: "Approve" },
+              style: "primary",
+              action_id: "approve_overtime",
+              value: JSON.stringify({ userId: user_id, name, date, hours, reason })
+            },
+            {
+              type: "button",
+              text: { type: "plain_text", text: "Deny" },
+              style: "danger",
+              action_id: "deny_overtime",
+              value: JSON.stringify({ userId: user_id, name, date, hours, reason })
+            }
+          ]
+        }
+      ]
+    });
+  }
+
+  res.json({
+    response_type: "ephemeral",
+    text: `Your overtime request for ${hours} hours on ${date} has been sent for approval.`
+  });
+});
+
+// /undertime - command for employees
+app.post("/slack/command/undertime", async (req, res) => {
+  const user_id = req.body.user_id;
+  const name = await fetchSlackDisplayName(user_id);
+
+  const args = req.body.text.trim().split(/\s+/);
+  if (args.length < 3) {
+    return res.json({ response_type: "ephemeral", text: "Usage: /undertime MM/DD/YYYY hours reason" });
+  }
+  const [date, hours, ...reasonArr] = args;
+  const reason = reasonArr.join(" ");
+  await logRequest("undertime", user_id, name, date, hours, reason);
+
+  // DM all admins
+  const adminIds = await getAdminSlackIds();
+  for (const adminId of adminIds) {
+    await slackWeb.chat.postMessage({
+      channel: adminId,
+      text: `*Undertime Request*\nEmployee: *${name}*\nDate: *${date}*\nHours: *${hours}*\nReason: ${reason || "-"}\n`,
+      blocks: [
+        { type: "section", text: { type: "mrkdwn", text: `*Undertime Request*\n*Employee:* ${name}\n*Date:* ${date}\n*Hours:* ${hours}\n*Reason:* ${reason || "-"}` } },
+        {
+          type: "actions",
+          elements: [
+            {
+              type: "button",
+              text: { type: "plain_text", text: "Approve" },
+              style: "primary",
+              action_id: "approve_undertime",
+              value: JSON.stringify({ userId: user_id, name, date, hours, reason })
+            },
+            {
+              type: "button",
+              text: { type: "plain_text", text: "Deny" },
+              style: "danger",
+              action_id: "deny_undertime",
+              value: JSON.stringify({ userId: user_id, name, date, hours, reason })
+            }
+          ]
+        }
+      ]
+    });
+  }
+
+  res.json({
+    response_type: "ephemeral",
+    text: `Your undertime request for ${hours} hours on ${date} has been sent for approval.`
+  });
+});
+
+// slack interactive actions handler
+app.post("/slack/actions", express.json(), async (req, res) => {
+  const payload = JSON.parse(req.body.payload);
+  const action = payload.actions[0];
+  const val = JSON.parse(action.value);
+  const type = action.action_id.includes("overtime") ? "overtime" : "undertime";
+  const approved = action.action_id.startsWith("approve");
+
+  // Update Requests sheet to APPROVED/DENIED
+  const requestsRes = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: "Requests!A:H"
+  });
+  const rows = requestsRes.data.values || [];
+  const rowIdx = rows.findIndex(row =>
+    row[0] === type &&
+    row[1] === val.userId &&
+    row[2] === val.name &&
+    row[3] === val.date &&
+    row[4] === val.hours &&
+    row[5] === val.reason &&
+    row[6] === "PENDING"
+  );
+  if (rowIdx > 0) {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `Requests!G${rowIdx + 1}`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: { values: [[approved ? "APPROVED" : "DENIED"]] }
+    });
+
+    // If approved, update attendance sheet
+    if (approved) {
+      const year = moment(val.date, "MM/DD/YYYY").year().toString();
+      await ensureSheetExists(year);
+      const attRes = await sheets.spreadsheets.values.get({
+        spreadsheetId: SHEET_ID,
+        range: `${year}!A:G`
+      });
+      const attRows = attRes.data.values || [];
+      const attIdx = attRows.findIndex(
+        (row, idx) =>
+          idx > 0 &&
+          row[0] && row[0].toLowerCase() === val.name.toLowerCase() &&
+          row[1] && row[1] === val.date
+      );
+      if (attIdx > 0) {
+        // Overtime is column F, Undertime is column G
+        await sheets.spreadsheets.values.update({
+          spreadsheetId: SHEET_ID,
+          range: `${year}!${type === "overtime" ? "F" : "G"}${attIdx + 1}`,
+          valueInputOption: "USER_ENTERED",
+          requestBody: { values: [[val.hours]] }
+        });
+      }
+    }
+
+    // Notify employee via DM
+    await slackWeb.chat.postMessage({
+      channel: val.userId,
+      text: approved
+        ? `✅ Your ${type} request for ${val.hours} hours on ${val.date} has been *approved* by an admin.`
+        : `❌ Your ${type} request for ${val.hours} hours on ${val.date} has been *denied* by an admin.`
+    });
+
+    // Notify admin in the thread
+    res.json({
+      text: approved ? "Approved ✅" : "Denied ❌",
+      replace_original: true
+    });
+  } else {
+    res.json({ text: "This request was already processed." });
+  }
+});
+
 // /help (shows all commands for admin, basic for employee)
 app.post("/slack/command/help", async (req, res) => {
   const user_id = req.body.user_id;
