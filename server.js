@@ -21,6 +21,70 @@ const auth = new google.auth.GoogleAuth({
 });
 const sheets = google.sheets({ version: "v4", auth });
 
+// Helper Functions
+const { WebClient } = require("@slack/web-api");
+const slackWeb = new WebClient(SLACK_BOT_TOKEN);
+
+// Helper to get admin Slack user IDs
+async function getAdminSlackIds() {
+  const res = await sheets.spreadsheets.values.get({
+    spreadsheetId: SHEET_ID,
+    range: "Admins!A:A"
+  });
+  const adminEmails = (res.data.values || []).slice(1).map(row => (row[0] || "").toLowerCase().trim());
+  let adminIds = [];
+  for (const email of adminEmails) {
+    try {
+      const userResp = await slackWeb.users.lookupByEmail({ email });
+      if (userResp.ok && userResp.user && userResp.user.id) {
+        adminIds.push(userResp.user.id);
+      }
+    } catch (e) {}
+  }
+  return adminIds;
+}
+
+// Helper to ensure Requests sheet exists
+async function ensureRequestsSheet() {
+  const res = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
+  const exists = res.data.sheets.some(
+    (sheet) => sheet.properties.title === "Requests"
+  );
+  if (!exists) {
+    await sheets.spreadsheets.batchUpdate({
+      spreadsheetId: SHEET_ID,
+      requestBody: {
+        requests: [{ addSheet: { properties: { title: "Requests" } } }]
+      }
+    });
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SHEET_ID,
+      range: `Requests!A1:H1`,
+      valueInputOption: "USER_ENTERED",
+      requestBody: {
+        values: [[
+          "Type", "UserId", "Name", "Date", "Hours", "Reason", "Status", "RequestTime"
+        ]]
+      }
+    });
+  }
+}
+
+// Helper to log a request
+async function logRequest(type, userId, name, date, hours, reason) {
+  await ensureRequestsSheet();
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SHEET_ID,
+    range: "Requests!A:H",
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[
+        type, userId, name, date, hours, reason, "PENDING", moment().tz(TIMEZONE).format("MM/DD/YYYY h:mm A")
+      ]]
+    }
+  });
+}
+
 // ==== UTILITIES ====
 
 async function fetchSlackDisplayName(user_id) {
