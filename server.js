@@ -310,50 +310,49 @@ app.post("/slack/command/myattendance", async (req, res) => {
 app.post("/slack/command/viewattendance", async (req, res) => {
   const today = moment().tz(TIMEZONE).format("MM/DD/YYYY");
   const year = moment().tz(TIMEZONE).year().toString();
-  await ensureSheetExists(year);
 
-  let rows = [];
   try {
+    await ensureSheetExists(year);
+
     const result = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
       range: `${year}!A:G`
     });
-    rows = result.data.values || [];
-  } catch (err) {
-    return res.json({
-      response_type: "ephemeral",
-      text: "Error fetching attendance data. Please check your Google Sheet."
-    });
-  }
 
-  // Filter for today only, skip header
-  const todayRows = rows.filter((row, idx) => idx > 0 && row[1] === today);
+    const rows = result.data.values || [];
+    const todayRows = rows.filter((row, idx) => idx > 0 && row[1] === today);
 
-  if (todayRows.length === 0) {
+    if (todayRows.length === 0) {
+      return res.json({
+        response_type: "in_channel",
+        text: `No attendance records for today (${today}).`
+      });
+    }
+
+    let table = "```";
+table += "Name         | In      | Out    | Total | OT | UT\n";
+table += "-------------|---------|--------|-------|----|---\n";
+todayRows.forEach(row => {
+  table += (row[0] || "").padEnd(12) + " | ";     // Name (12 chars)
+  table += (row[2] || "").padEnd(6) + " | ";      // In (6 chars)
+  table += (row[3] || "").padEnd(6) + " | ";      // Out (6 chars)
+  table += (row[4] || "").padEnd(5) + " | ";      // Total (5 chars)
+  table += (row[5] || "").padEnd(2) + " | ";      // OT (2 chars)
+  table += (row[6] || "").padEnd(2) + "\n";       // UT (2 chars)
+});
+table += "```";
+
     return res.json({
       response_type: "in_channel",
-      text: `No attendance records for today (${today}).`
+      text: `*Attendance for ${today}:*\n${table}`
+    });
+  } catch (err) {
+    console.error("viewattendance error:", err);
+    return res.json({
+      response_type: "ephemeral",
+      text: "Error fetching attendance data. Please check that your Google Sheet has a tab for this year, is shared with your service account, and your Sheet ID is correct."
     });
   }
-
-  // Properly aligned, wide table
-  let table = "```";
-  table += "Name                  | In      | Out     | Total     | OT     | UT    \n";
-  table += "----------------------|---------|---------|-----------|--------|-------\n";
-  todayRows.forEach(row => {
-    table += (row[0] || "").padEnd(22) + " | ";
-    table += (row[2] || "").padEnd(8) + " | ";
-    table += (row[3] || "").padEnd(8) + " | ";
-    table += (row[4] || "").padEnd(11) + "| ";
-    table += (row[5] || "").padEnd(7) + "| ";
-    table += (row[6] || "").padEnd(6) + "\n";
-  });
-  table += "```";
-
-  res.json({
-    response_type: "in_channel", // Show to everyone!
-    text: `*Attendance for ${today}:*\n${table}`
-  });
 });
 
 // /help (shows all commands for admin, basic for employee)
