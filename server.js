@@ -314,6 +314,61 @@ app.post("/slack/command/myattendance", async (req, res) => {
   res.json({ response_type: "ephemeral", text: table });
 });
 
+// /viewattendance — Show everyone's attendance for today (in_channel)
+app.post("/slack/command/viewattendance", async (req, res) => {
+  const today = moment().tz(TIMEZONE).format("MM/DD/YYYY");
+  const year = moment().tz(TIMEZONE).year().toString();
+  await ensureSheetExists(year);
+
+  let rows = [];
+  try {
+    const result = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${year}!A:G`
+    });
+    rows = result.data.values || [];
+  } catch (err) {
+    return res.json({
+      response_type: "ephemeral",
+      text: "Error fetching attendance data. Please check your Google Sheet."
+    });
+  }
+
+  // Filter for today only, skip header
+  const todayRows = rows.filter((row, idx) => idx > 0 && row[1] === today);
+
+  if (todayRows.length === 0) {
+    return res.json({
+      response_type: "in_channel",
+      text: `No attendance records for today (${today}).`
+    });
+  }
+
+let table = "```";
+table += "Name                 | In      | Out     | Total   | OT   | UT  \n";
+table += "---------------------|---------|---------|---------|------|-----\n";
+todayRows.forEach(row => {
+  table += (row[0] || "").padEnd(21);        // Name (21 chars)
+  table += " | ";
+  table += (row[2] || "").padEnd(7);         // In (7 chars)
+  table += " | ";
+  table += (row[3] || "").padEnd(7);         // Out (7 chars)
+  table += " | ";
+  table += (row[4] || "").padEnd(8);         // Total (8 chars)
+  table += "| ";
+  table += (row[5] || "").padEnd(5);         // OT (5 chars)
+  table += "| ";
+  table += (row[6] || "").padEnd(4);         // UT (4 chars)
+  table += "\n";
+});
+table += "```";
+
+  res.json({
+    response_type: "in_channel", // Show to everyone!
+    text: `*Attendance for ${today}:*\n${table}`
+  });
+});
+
 // /help (shows all commands for admin, basic for employee)
 app.post("/slack/command/help", async (req, res) => {
   const user_id = req.body.user_id;
@@ -352,7 +407,7 @@ app.post("/slack/command/help", async (req, res) => {
   res.json({ response_type: "ephemeral", text });
 });
 
-// Add more command endpoints (viewattendance, admin, approval, etc.) following this pattern!
+// Add more command endpoints (editattendance, approval, etc.) following this pattern!
 
 app.get("/", (req, res) => {
   res.send("Attendance Bot running!");
