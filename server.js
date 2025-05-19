@@ -1,4 +1,3 @@
-// server.js
 const express = require("express");
 const bodyParser = require("body-parser");
 const fs = require("fs");
@@ -10,10 +9,9 @@ const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // ==== CONFIG ====
-// UPDATE THIS WITH YOUR GOOGLE SHEET ID!
 const SHEET_ID = "11pLzp9wpM6Acw4daxpf4c41SD24iQBVs6NQMxGy44Bs";
 const TIMEZONE = "Asia/Manila";
-const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "xoxb-..."; // Best to set in .env
+const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "xoxb-...";
 
 // Google Sheets Auth
 const creds = JSON.parse(fs.readFileSync("credentials.json", "utf8"));
@@ -73,7 +71,6 @@ async function fetchSlackEmail(user_id) {
   }
 }
 
-// SKIPS HEADER ROW!
 async function isAdmin(email) {
   try {
     const res = await sheets.spreadsheets.values.get({
@@ -81,7 +78,7 @@ async function isAdmin(email) {
       range: "Admins!A:A"
     });
     const adminEmails = (res.data.values || [])
-      .slice(1) // skip header!
+      .slice(1)
       .map(row => (row[0] || "").toLowerCase().trim());
     return adminEmails.includes((email || "").toLowerCase().trim());
   } catch (err) {
@@ -108,7 +105,6 @@ function calculateTotalHours(clockIn, clockOut) {
   const inTime = moment(clockIn, "hh:mm A");
   const outTime = moment(clockOut, "hh:mm A");
   if (!inTime.isValid() || !outTime.isValid()) return "";
-  // Standard: 8AM-5PM, lunch 12:00-1:00PM
   let breakMinutes = 0;
   const noon = moment("12:00 PM", "hh:mm A");
   const afterLunch = moment("1:00 PM", "hh:mm A");
@@ -150,7 +146,6 @@ async function ensureSheetExists(sheetName) {
         ]
       }
     });
-    // Add headers after creating sheet
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
       range: `${sheetName}!A1:G1`,
@@ -170,7 +165,6 @@ async function ensureSheetExists(sheetName) {
   }
 }
 
-// Prevent duplicate row for same user/date; always update instead of append
 async function upsertAttendance({ name, date, clockIn, clockOut }) {
   const year = moment(date, "MM/DD/YYYY").year().toString();
   await ensureSheetExists(year);
@@ -190,7 +184,6 @@ async function upsertAttendance({ name, date, clockIn, clockOut }) {
   if (clockIn && clockOut) totalHours = calculateTotalHours(clockIn, clockOut);
 
   if (rowIdx > 0) {
-    // Update
     const valuesToUpdate = [
       clockIn || rows[rowIdx][2] || "",
       clockOut || rows[rowIdx][3] || "",
@@ -207,7 +200,6 @@ async function upsertAttendance({ name, date, clockIn, clockOut }) {
       }
     });
   } else {
-    // Insert new
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
       range: `${year}!A:G`,
@@ -344,22 +336,24 @@ app.post("/slack/command/viewattendance", async (req, res) => {
     });
   }
 
-let table = "```";
-table += "Name                  | In      | Out     | Total     | OT     | UT    \n";
-table += "----------------------|---------|---------|-----------|--------|-------\n";
-todayRows.forEach(row => {
-  table += (row[0] || "").padEnd(22) + " | ";   // Name (22 chars)
-  table += (row[2] || "").padEnd(8) + " | ";    // In (8 chars)
-  table += (row[3] || "").padEnd(8) + " | ";    // Out (8 chars)
-  table += (row[4] || "").padEnd(11) + "| ";    // Total (11 chars: padEnd(11) to match "Total     ")
-  table += (row[5] || "").padEnd(7) + "| ";     // OT (7 chars to match "OT     ")
-  table += (row[6] || "").padEnd(6) + "\n";     // UT (6 chars to match "UT    ")
-});
-table += "```";
+  // Properly aligned, wide table
+  let table = "```";
+  table += "Name                  | In      | Out     | Total     | OT     | UT    \n";
+  table += "----------------------|---------|---------|-----------|--------|-------\n";
+  todayRows.forEach(row => {
+    table += (row[0] || "").padEnd(22) + " | ";
+    table += (row[2] || "").padEnd(8) + " | ";
+    table += (row[3] || "").padEnd(8) + " | ";
+    table += (row[4] || "").padEnd(11) + "| ";
+    table += (row[5] || "").padEnd(7) + "| ";
+    table += (row[6] || "").padEnd(6) + "\n";
+  });
+  table += "```";
 
-res.json({
-  response_type: "in_channel", // Show to everyone!
-  text: `*Attendance for ${today}:*\n${table}`
+  res.json({
+    response_type: "in_channel", // Show to everyone!
+    text: `*Attendance for ${today}:*\n${table}`
+  });
 });
 
 // /help (shows all commands for admin, basic for employee)
@@ -399,8 +393,6 @@ app.post("/slack/command/help", async (req, res) => {
   }
   res.json({ response_type: "ephemeral", text });
 });
-
-// Add more command endpoints (editattendance, approval, etc.) following this pattern!
 
 app.get("/", (req, res) => {
   res.send("Attendance Bot running!");
