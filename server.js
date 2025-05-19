@@ -345,28 +345,21 @@ app.post("/slack/command/viewattendance", async (req, res) => {
   }
 
 let table = "```";
-table += "Name                 | In      | Out     | Total   | OT   | UT  \n";
-table += "---------------------|---------|---------|---------|------|-----\n";
+table += "Name                  | In      | Out     | Total     | OT     | UT    \n";
+table += "----------------------|---------|---------|-----------|--------|-------\n";
 todayRows.forEach(row => {
-  table += (row[0] || "").padEnd(21);        // Name (21 chars)
-  table += " | ";
-  table += (row[2] || "").padEnd(7);         // In (7 chars)
-  table += " | ";
-  table += (row[3] || "").padEnd(7);         // Out (7 chars)
-  table += " | ";
-  table += (row[4] || "").padEnd(8);         // Total (8 chars)
-  table += "| ";
-  table += (row[5] || "").padEnd(5);         // OT (5 chars)
-  table += "| ";
-  table += (row[6] || "").padEnd(4);         // UT (4 chars)
-  table += "\n";
+  table += (row[0] || "").padEnd(22) + " | ";   // Name (22 chars)
+  table += (row[2] || "").padEnd(8) + " | ";    // In (8 chars)
+  table += (row[3] || "").padEnd(8) + " | ";    // Out (8 chars)
+  table += (row[4] || "").padEnd(11) + "| ";    // Total (11 chars: padEnd(11) to match "Total     ")
+  table += (row[5] || "").padEnd(7) + "| ";     // OT (7 chars to match "OT     ")
+  table += (row[6] || "").padEnd(6) + "\n";     // UT (6 chars to match "UT    ")
 });
 table += "```";
 
-  res.json({
-    response_type: "in_channel", // Show to everyone!
-    text: `*Attendance for ${today}:*\n${table}`
-  });
+res.json({
+  response_type: "in_channel", // Show to everyone!
+  text: `*Attendance for ${today}:*\n${table}`
 });
 
 // /help (shows all commands for admin, basic for employee)
