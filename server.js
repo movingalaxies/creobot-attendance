@@ -145,8 +145,8 @@ async function upsertAttendance({ name, date, clockIn, clockOut }) {
   const rowIdx = rows.findIndex(
     (row, idx) =>
       idx > 0 &&
-      row[0] && row[0].trim().toLowerCase() === name.trim().toLowerCase() &&
-      row[1] && row[1].trim() === date
+      row[0] && row[0].toLowerCase() === name.toLowerCase() &&
+      row[1] && row[1] === date
   );
 
   let existingClockIn = "";
@@ -222,7 +222,6 @@ app.post("/slack/command/clockout", async (req, res) => {
     else return res.json({ response_type: "ephemeral", text: "Please enter time as `h:mm AM/PM` (example: 5:00 PM)" });
   }
   const name = await fetchSlackDisplayName(user_id);
-
   await upsertAttendance({ name, date, clockIn: null, clockOut });
   res.json({
     response_type: "ephemeral",
@@ -234,8 +233,17 @@ app.post("/slack/command/clockout", async (req, res) => {
 app.post("/slack/command/myattendance", async (req, res) => {
   const user_id = req.body.user_id;
   const name = await fetchSlackDisplayName(user_id);
-  const date = moment().tz(TIMEZONE).format("MM/DD/YYYY");
   const sheetName = moment().tz(TIMEZONE).format("YYYY");
+
+  let date = moment().tz(TIMEZONE).format("MM/DD/YYYY");
+  if (req.body.text) {
+    const inputDate = moment(req.body.text.trim(), ["MM/DD/YYYY", "M/D/YYYY"], true);
+    if (inputDate.isValid()) {
+      date = inputDate.format("MM/DD/YYYY");
+    } else {
+      return res.json({ response_type: "ephemeral", text: "⛔ Invalid date format. Use MM/DD/YYYY (example: 05/22/2025)" });
+    }
+  }
 
   try {
     await ensureSheetExists(sheetName);
@@ -245,16 +253,37 @@ app.post("/slack/command/myattendance", async (req, res) => {
     });
 
     const rows = result.data.values || [];
+    const record = rows.find((row, idx) => idx > 0 && row[0] && row[0].trim().toLowerCase() === name.trim().toLowerCase() && row[1] && row[1].trim() === date);
+
+    if (!record) {
+      return res.json({ response_type: "ephemeral", text: `No attendance found for *${name}* on ${date}.` });
+    }
+
+    const clockIn = record[2] ? moment(record[2], "h:mm A").format("h:mm A") : "-";
+    const clockOut = record[3] ? moment(record[3], "h:mm A").format("h:mm A") : "-";
+    const total = record[4] || "-";
+
+    res.json({
+      response_type: "ephemeral",
+      text: `🗓️ *${date}* for *${name}*
+Clock In: *${clockIn}*
+Clock Out: *${clockOut}*
+Total Hours: *${total}*`
+    });
+  } catch (error) {
+    console.error("myattendance error:", error);
+    res.json({ response_type: "ephemeral", text: "⚠️ Error fetching attendance. Please try again later." });
+  }
+});
+
+    const rows = result.data.values || [];
     const record = rows.find((row, idx) => idx > 0 && row[0] === name && row[1] === date);
 
     if (!record) {
       return res.json({ response_type: "ephemeral", text: `No attendance found for *${name}* on ${date}.` });
     }
 
-    const [, , rawClockIn, rawClockOut, rawTotal] = record;
-    const clockIn = rawClockIn ? moment(rawClockIn, "h:mm A").format("h:mm A") : "-";
-    const clockOut = rawClockOut ? moment(rawClockOut, "h:mm A").format("h:mm A") : "-";
-    const total = rawTotal || "-";
+    const [ , , clockIn, clockOut, total ] = record;
     res.json({
       response_type: "ephemeral",
       text: `🗓️ *${date}* for *${name}*
@@ -281,7 +310,7 @@ app.post("/slack/command/viewattendance", async (req, res) => {
     });
 
     const rows = result.data.values || [];
-    const todayRows = rows.filter((row, idx) => idx > 0 && row[1] === today);
+    const todayRows = rows.filter((row, idx) => idx > 0 && row[1]?.trim() === today);
 
     if (todayRows.length === 0) {
       return res.json({
@@ -294,11 +323,11 @@ let table = "```\n";
 table += "Name         | In      | Out\n";
 table += "-------------|---------|--------\n";
 todayRows.forEach(row => {
-  const clockInFormatted = row[2] ? moment(row[2], "h:mm A").format("h:mm A") : "-";
-  const clockOutFormatted = row[3] ? moment(row[3], "h:mm A").format("h:mm A") : "-";
+  const clockIn = row[2] ? moment(row[2], "h:mm A").isValid() ? moment(row[2], "h:mm A").format("h:mm A") : "-" : "-";
+  const clockOut = row[3] ? moment(row[3], "h:mm A").isValid() ? moment(row[3], "h:mm A").format("h:mm A") : "-" : "-";
   table += (row[0] || "").padEnd(13) + "| ";
-  table += clockInFormatted.padEnd(8) + "| ";
-  table += clockOutFormatted.padEnd(7) + "\n";
+  table += clockIn.padEnd(8) + "| ";
+  table += clockOut.padEnd(7) + "\n";
 });
 table += "```";
 
@@ -320,12 +349,22 @@ ${table}`
 app.post("/slack/command/help", async (req, res) => {
   const helpText = `Here are the available commands you can use:
 
-• /clockin [time] — Clock in for the day. Example: /clockin 8:00 AM
-• /clockout [time] — Clock out for the day. Example: /clockout 5:00 PM
-• /myattendance — View your own attendance for today.
-• /viewattendance — View everyone's attendance for today.`;
+• /clockin [time] — Clock in for the day.
+  Example: /clockin 8:00 AM
+
+• /clockout [time] — Clock out for the day.
+  Example: /clockout 5:00 PM
+
+• /myattendance [MM/DD/YYYY] — View your own attendance for a specific date.
+  Example: /myattendance 05/22/2025
+  (If no date is given, it will show today's record.)
+
+• /viewattendance — View everyone's attendance for today.
+  Example: /viewattendance`;
 
   res.json({ response_type: "ephemeral", text: helpText });
+});
+});
 });
 
 // Home Route
