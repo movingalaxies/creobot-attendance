@@ -276,27 +276,6 @@ Total Hours: *${total}*`
   }
 });
 
-    const rows = result.data.values || [];
-    const record = rows.find((row, idx) => idx > 0 && row[0] === name && row[1] === date);
-
-    if (!record) {
-      return res.json({ response_type: "ephemeral", text: `No attendance found for *${name}* on ${date}.` });
-    }
-
-    const [ , , clockIn, clockOut, total ] = record;
-    res.json({
-      response_type: "ephemeral",
-      text: `🗓️ *${date}* for *${name}*
-Clock In: *${clockIn || '-'}*
-Clock Out: *${clockOut || '-'}*
-Total Hours: *${total || '-'}*`
-    });
-  } catch (error) {
-    console.error("myattendance error:", error);
-    res.json({ response_type: "ephemeral", text: "⚠️ Error fetching attendance. Please try again later." });
-  }
-});
-
 // /viewattendance Endpoint
 app.post("/slack/command/viewattendance", async (req, res) => {
   const today = moment().tz(TIMEZONE).format("MM/DD/YYYY");
@@ -363,8 +342,6 @@ app.post("/slack/command/help", async (req, res) => {
   Example: /viewattendance`;
 
   res.json({ response_type: "ephemeral", text: helpText });
-});
-});
 });
 
 // Home Route
