@@ -134,7 +134,7 @@ async function ensureSheetExists(sheetName) {
 
 // Insert or Update Attendance Entry
 async function upsertAttendance({ name, date, clockIn, clockOut }) {
-  const sheetName = process.env.ACTIVE_SHEET || "test";
+  const sheetName = moment().tz(TIMEZONE).format("YYYY");
   await ensureSheetExists(sheetName);
 
   const res = await sheets.spreadsheets.values.get({
@@ -145,8 +145,8 @@ async function upsertAttendance({ name, date, clockIn, clockOut }) {
   const rowIdx = rows.findIndex(
     (row, idx) =>
       idx > 0 &&
-      row[0] && row[0].toLowerCase() === name.toLowerCase() &&
-      row[1] && row[1] === date
+      row[0] && row[0].trim().toLowerCase() === name.trim().toLowerCase() &&
+      row[1] && row[1].trim() === date
   );
 
   let existingClockIn = "";
@@ -234,7 +234,7 @@ app.post("/slack/command/myattendance", async (req, res) => {
   const user_id = req.body.user_id;
   const name = await fetchSlackDisplayName(user_id);
   const date = moment().tz(TIMEZONE).format("MM/DD/YYYY");
-  const sheetName = process.env.ACTIVE_SHEET || "test";
+  const sheetName = moment().tz(TIMEZONE).format("YYYY");
 
   try {
     await ensureSheetExists(sheetName);
@@ -250,7 +250,10 @@ app.post("/slack/command/myattendance", async (req, res) => {
       return res.json({ response_type: "ephemeral", text: `No attendance found for *${name}* on ${date}.` });
     }
 
-    const [ , , clockIn, clockOut, total ] = record;
+    const [, , rawClockIn, rawClockOut, rawTotal] = record;
+    const clockIn = rawClockIn ? moment(rawClockIn, "h:mm A").format("h:mm A") : "-";
+    const clockOut = rawClockOut ? moment(rawClockOut, "h:mm A").format("h:mm A") : "-";
+    const total = rawTotal || "-";
     res.json({
       response_type: "ephemeral",
       text: `🗓️ *${date}* for *${name}*
@@ -267,7 +270,7 @@ Total Hours: *${total || '-'}*`
 // /viewattendance Endpoint
 app.post("/slack/command/viewattendance", async (req, res) => {
   const today = moment().tz(TIMEZONE).format("MM/DD/YYYY");
-  const sheetName = process.env.ACTIVE_SHEET || "test";
+  const sheetName = moment().tz(TIMEZONE).format("YYYY");
 
   try {
     await ensureSheetExists(sheetName);
@@ -290,9 +293,12 @@ let table = "```\n";
 table += "Name         | In      | Out\n";
 table += "-------------|---------|--------\n";
 todayRows.forEach(row => {
+  const clockInFormatted = row[2] ? moment(row[2], "h:mm A").format("h:mm A") : "-";
+  const clockOutFormatted = row[3] ? moment(row[3], "h:mm A").format("h:mm A") : "-";
   table += (row[0] || "").padEnd(13) + "| ";
-  table += moment(row[2], "h:mm A").format("h:mm A").padEnd(8) + "| ";
-  table += moment(row[3], "h:mm A").format("h:mm A").padEnd(7) + "\n";
+  table += clockInFormatted.padEnd(8) + "| ";
+  table += clockOutFormatted.padEnd(7) + "
+";
 });
 table += "```";
 
