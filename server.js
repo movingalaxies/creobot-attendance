@@ -9,9 +9,8 @@ const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
 
 // ==== CONFIG ====
-const SHEET_ID = "11pLzp9wpM6Acw4daxpf4c41SD24iQBVs6NQMxGy44Bs";
+const SHEET_ID = process.env.SHEET_ID;
 const TIMEZONE = "Asia/Manila";
-const SLACK_BOT_TOKEN = process.env.SLACK_BOT_TOKEN || "xoxb-...";
 
 // Google Sheets Auth
 const creds = JSON.parse(fs.readFileSync("credentials.json", "utf8"));
@@ -23,116 +22,84 @@ const sheets = google.sheets({ version: "v4", auth });
 
 // ==== UTILITIES ====
 
+// Fetch Slack Display Name
 async function fetchSlackDisplayName(user_id) {
   try {
     const resp = await axios.get("https://slack.com/api/users.info", {
       params: { user: user_id },
-      headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}` }
+      headers: { Authorization: `Bearer ${process.env.SLACK_BOT_TOKEN}` }
     });
-    if (
-      resp.data &&
-      resp.data.user &&
-      resp.data.user.profile &&
-      resp.data.user.profile.display_name
-    ) {
-      return (
-        resp.data.user.profile.display_name ||
-        resp.data.user.real_name ||
-        resp.data.user.name ||
-        "Unknown"
-      );
-    }
-    if (resp.data.user && resp.data.user.real_name) {
-      return resp.data.user.real_name;
-    }
-    return "Unknown";
-  } catch (e) {
+
+    console.log("Slack API response for user info:", JSON.stringify(resp.data, null, 2));
+
+    const user = resp.data?.user;
+    const profile = user?.profile || {};
+
+    return (
+      profile.display_name?.trim() ||
+      profile.real_name?.trim() ||
+      user.name?.trim() ||
+      "Unknown"
+    );
+  } catch (error) {
+    console.error("Error fetching Slack display name:", error);
     return "Unknown";
   }
 }
 
-async function fetchSlackEmail(user_id) {
-  try {
-    const resp = await axios.get("https://slack.com/api/users.info", {
-      params: { user: user_id },
-      headers: { Authorization: `Bearer ${SLACK_BOT_TOKEN}` }
-    });
-    if (
-      resp.data &&
-      resp.data.user &&
-      resp.data.user.profile &&
-      resp.data.user.profile.email
-    ) {
-      return resp.data.user.profile.email;
-    }
-    return null;
-  } catch (e) {
-    console.error("Error fetching email:", e);
-    return null;
-  }
-}
+// Fetch Slack Email
+// Removed unused fetchSlackEmail function
 
-async function isAdmin(email) {
-  try {
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: "Admins!A:A"
-    });
-    const adminEmails = (res.data.values || [])
-      .slice(1)
-      .map(row => (row[0] || "").toLowerCase().trim());
-    return adminEmails.includes((email || "").toLowerCase().trim());
-  } catch (err) {
-    console.error("Error checking admin:", err);
-    return false;
-  }
-}
 
+
+// Parse Custom Time Input
 function getCustomTime(text) {
   if (!text) return null;
   let inputTime = text.trim();
-  if (/^\d{1,2}:\d{2} ?(AM|PM)?$/i.test(inputTime)) {
-    if (!inputTime.match(/AM|PM/i)) {
-      const hour = parseInt(inputTime.split(":")[0]);
+  console.log("Parsing custom time input:", inputTime);
+
+  // Accept formats like "7:30 AM" or "19:45"
+  if (/^\d{1,2}:\d{2}\s?(AM|PM)?$/i.test(inputTime)) {
+    if (!/AM|PM/i.test(inputTime)) {
+      const hour = parseInt(inputTime.split(":")[0], 10);
       inputTime += hour < 12 ? " AM" : " PM";
     }
-    return moment(inputTime, "h:mm A").format("h:mm A");
+
+    const parsed = moment(inputTime, "h:mm A", true);
+    return parsed.isValid() ? parsed.format("h:mm A") : null;
   }
+
   return null;
 }
 
+// Calculate Total Working Hours
 function calculateTotalHours(clockIn, clockOut) {
   if (!clockIn || !clockOut) return "";
-  const inTime = moment(clockIn, "hh:mm A");
-  const outTime = moment(clockOut, "hh:mm A");
+  const inTime = moment(clockIn, "h:mm A");
+  const outTime = moment(clockOut, "h:mm A");
   if (!inTime.isValid() || !outTime.isValid()) return "";
+
   let breakMinutes = 0;
-  const noon = moment("12:00 PM", "hh:mm A");
-  const afterLunch = moment("1:00 PM", "hh:mm A");
+  const noon = moment("12:00 PM", "h:mm A");
+  const afterLunch = moment("1:00 PM", "h:mm A");
+
+  // Deduct 1 hour lunch break if time covers 12–1 PM
   if (inTime.isBefore(afterLunch) && outTime.isAfter(noon)) {
     breakMinutes = 60;
   }
+
   let duration = outTime.diff(inTime, "minutes") - breakMinutes;
   if (duration < 0) duration = 0;
+
   const hours = Math.floor(duration / 60);
   const minutes = duration % 60;
-  return `${hours.toString().padStart(2,"0")}:${minutes.toString().padStart(2,"0")}`;
+  return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}`;
 }
 
-function parseDateRange(arg) {
-  if (!arg) return { start: null, end: null };
-  const parts = arg.split("-");
-  if (parts.length === 2) {
-    return {
-      start: moment(parts[0], "MM/DD/YYYY"),
-      end: moment(parts[1], "MM/DD/YYYY")
-    };
-  } else {
-    const date = moment(arg, "MM/DD/YYYY");
-    return { start: date, end: date };
-  }
-}
+// Parse Date Range for Reports
+function parseDateRange(arg) { /* ... */ }
 
+// Ensure Sheet Exists and Write Headers if Needed
 async function ensureSheetExists(sheetName) {
   const res = await sheets.spreadsheets.get({ spreadsheetId: SHEET_ID });
   const exists = res.data.sheets.some(
@@ -142,37 +109,37 @@ async function ensureSheetExists(sheetName) {
     await sheets.spreadsheets.batchUpdate({
       spreadsheetId: SHEET_ID,
       requestBody: {
-        requests: [
-          { addSheet: { properties: { title: sheetName } } }
-        ]
-      }
-    });
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `${sheetName}!A1:G1`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: [[
-          "Name of Employee",
-          "Date",
-          "Clock In",
-          "Clock Out",
-          "Total Hours",
-          "Overtime Hours",
-          "Undertime Hours"
-        ]]
+        requests: [{ addSheet: { properties: { title: sheetName } } }]
       }
     });
   }
+  // Always write headers
+  await sheets.spreadsheets.values.update({
+    spreadsheetId: SHEET_ID,
+    range: `${sheetName}!A1:G1`,
+    valueInputOption: "USER_ENTERED",
+    requestBody: {
+      values: [[
+        "Name of Employee",
+        "Date",
+        "Clock In",
+        "Clock Out",
+        "Total Hours",
+        "Overtime Hours",
+        "Undertime Hours"
+      ]]
+    }
+  });
 }
 
+// Insert or Update Attendance Entry
 async function upsertAttendance({ name, date, clockIn, clockOut }) {
-  const year = moment(date, "MM/DD/YYYY").year().toString();
-  await ensureSheetExists(year);
+  const sheetName = process.env.ACTIVE_SHEET || "test";
+  await ensureSheetExists(sheetName);
 
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SHEET_ID,
-    range: `${year}!A:G`
+    range: `${sheetName}!A:G`
   });
   const rows = res.data.values || [];
   const rowIdx = rows.findIndex(
@@ -181,20 +148,29 @@ async function upsertAttendance({ name, date, clockIn, clockOut }) {
       row[0] && row[0].toLowerCase() === name.toLowerCase() &&
       row[1] && row[1] === date
   );
-  let totalHours = "";
-  if (clockIn && clockOut) totalHours = calculateTotalHours(clockIn, clockOut);
+
+  let existingClockIn = "";
+  let existingClockOut = "";
+  if (rowIdx > 0) {
+    existingClockIn = rows[rowIdx][2] || "";
+    existingClockOut = rows[rowIdx][3] || "";
+  }
+
+  const finalClockIn = clockIn || existingClockIn;
+  const finalClockOut = clockOut || existingClockOut;
+  const totalHours = (finalClockIn && finalClockOut) ? calculateTotalHours(finalClockIn, finalClockOut) : "";
 
   if (rowIdx > 0) {
     const valuesToUpdate = [
-      clockIn || rows[rowIdx][2] || "",
-      clockOut || rows[rowIdx][3] || "",
-      totalHours || rows[rowIdx][4] || "",
+      finalClockIn,
+      finalClockOut,
+      totalHours,
       rows[rowIdx][5] || "",
       rows[rowIdx][6] || ""
     ];
     await sheets.spreadsheets.values.update({
       spreadsheetId: SHEET_ID,
-      range: `${year}!C${rowIdx+1}:G${rowIdx+1}`,
+      range: `${sheetName}!C${rowIdx + 1}:G${rowIdx + 1}`,
       valueInputOption: "USER_ENTERED",
       requestBody: {
         values: [valuesToUpdate]
@@ -203,7 +179,7 @@ async function upsertAttendance({ name, date, clockIn, clockOut }) {
   } else {
     await sheets.spreadsheets.values.append({
       spreadsheetId: SHEET_ID,
-      range: `${year}!A:G`,
+      range: `${sheetName}!A:G`,
       valueInputOption: "USER_ENTERED",
       requestBody: {
         values: [[name, date, clockIn || "", clockOut || "", totalHours, "", ""]]
@@ -212,32 +188,12 @@ async function upsertAttendance({ name, date, clockIn, clockOut }) {
   }
 }
 
-async function getAttendance(name, startDate, endDate) {
-  let results = [];
-  let cur = moment(startDate);
-  while (cur.isSameOrBefore(endDate, "day")) {
-    const year = cur.year().toString();
-    await ensureSheetExists(year);
-    const res = await sheets.spreadsheets.values.get({
-      spreadsheetId: SHEET_ID,
-      range: `${year}!A:G`
-    });
-    const rows = res.data.values || [];
-    results = results.concat(
-      rows.filter((row, idx) =>
-        idx > 0 &&
-        row[0] && row[0].toLowerCase() === name.toLowerCase() &&
-        row[1] && row[1] === cur.format("MM/DD/YYYY")
-      )
-    );
-    cur.add(1, "day");
-  }
-  return results;
-}
+// Get Attendance Records
+async function getAttendance(name, startDate, endDate) { /* ... */ }
 
 // ==== SLACK COMMAND ENDPOINTS ====
 
-// /clockin
+// /clockin Endpoint
 app.post("/slack/command/clockin", async (req, res) => {
   const user_id = req.body.user_id;
   const date = moment().tz(TIMEZONE).format("MM/DD/YYYY");
@@ -255,7 +211,7 @@ app.post("/slack/command/clockin", async (req, res) => {
   });
 });
 
-// /clockout
+// /clockout Endpoint
 app.post("/slack/command/clockout", async (req, res) => {
   const user_id = req.body.user_id;
   const date = moment().tz(TIMEZONE).format("MM/DD/YYYY");
@@ -273,50 +229,53 @@ app.post("/slack/command/clockout", async (req, res) => {
   });
 });
 
-// /myattendance [date or range]
+// /myattendance Endpoint
 app.post("/slack/command/myattendance", async (req, res) => {
   const user_id = req.body.user_id;
   const name = await fetchSlackDisplayName(user_id);
-  let start, end;
-  if (req.body.text && req.body.text.trim()) {
-    const { start: s, end: e } = parseDateRange(req.body.text.trim());
-    start = s;
-    end = e;
-  } else {
-    start = end = moment().tz(TIMEZONE);
-  }
-  if (!start || !end) {
-    return res.json({ response_type: "ephemeral", text: "Please provide a date or range (MM/DD/YYYY or MM/DD/YYYY-MM/DD/YYYY)" });
-  }
-  const rows = await getAttendance(name, start, end);
-  if (rows.length === 0) {
-    return res.json({ response_type: "ephemeral", text: "No attendance records found for that period." });
-  }
-  let table = "```";
-  table += "Date       | In      | Out     | Total   | OT    | UT\n";
-  table += "-----------|---------|---------|---------|-------|-------\n";
-  rows.forEach(r => {
-    table += (r[1] || "").padEnd(11) + "| ";
-    table += (r[2] || "").padEnd(8) + "| ";
-    table += (r[3] || "").padEnd(8) + "| ";
-    table += (r[4] || "").padEnd(8) + "| ";
-    table += (r[5] || "").padEnd(5) + "| ";
-    table += (r[6] || "").padEnd(5) + "\n";
-  });
-  table += "```";
-  res.json({ response_type: "ephemeral", text: table });
-});
+  const date = moment().tz(TIMEZONE).format("MM/DD/YYYY");
+  const sheetName = process.env.ACTIVE_SHEET || "test";
 
-// /viewattendance — Show everyone's attendance for today (in_channel)
-app.post("/slack/command/viewattendance", async (req, res) => {
-  const today = moment().tz(TIMEZONE).format("MM/DD/YYYY");
-  const year = moment().tz(TIMEZONE).year().toString();
   try {
-    await ensureSheetExists(year);
+    await ensureSheetExists(sheetName);
     const result = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
-      range: `${year}!A:G`
+      range: `${sheetName}!A:G`
     });
+
+    const rows = result.data.values || [];
+    const record = rows.find((row, idx) => idx > 0 && row[0] === name && row[1] === date);
+
+    if (!record) {
+      return res.json({ response_type: "ephemeral", text: `No attendance found for *${name}* on ${date}.` });
+    }
+
+    const [ , , clockIn, clockOut, total ] = record;
+    res.json({
+      response_type: "ephemeral",
+      text: `🗓️ *${date}* for *${name}*
+Clock In: *${clockIn || '-'}*
+Clock Out: *${clockOut || '-'}*
+Total Hours: *${total || '-'}*`
+    });
+  } catch (error) {
+    console.error("myattendance error:", error);
+    res.json({ response_type: "ephemeral", text: "⚠️ Error fetching attendance. Please try again later." });
+  }
+});
+
+// /viewattendance Endpoint
+app.post("/slack/command/viewattendance", async (req, res) => {
+  const today = moment().tz(TIMEZONE).format("MM/DD/YYYY");
+  const sheetName = process.env.ACTIVE_SHEET || "test";
+
+  try {
+    await ensureSheetExists(sheetName);
+    const result = await sheets.spreadsheets.values.get({
+      spreadsheetId: SHEET_ID,
+      range: `${sheetName}!A:G`
+    });
+
     const rows = result.data.values || [];
     const todayRows = rows.filter((row, idx) => idx > 0 && row[1] === today);
 
@@ -327,189 +286,48 @@ app.post("/slack/command/viewattendance", async (req, res) => {
       });
     }
 
-    // Compact, aligned table
-    let table = "```";
-    table += "Name         | In      | Out    | Total | OT | UT\n";
-    table += "-------------|---------|--------|-------|----|---\n";
-    todayRows.forEach(row => {
-      table += (row[0] || "").padEnd(12) + " | ";
-      table += (row[2] || "").padEnd(6) + " | ";
-      table += (row[3] || "").padEnd(6) + " | ";
-      table += (row[4] || "").padEnd(5) + " | ";
-      table += (row[5] || "").padEnd(2) + " | ";
-      table += (row[6] || "").padEnd(2) + "\n";
-    });
-    table += "```";
+let table = "```\n";
+table += "Name         | In      | Out\n";
+table += "-------------|---------|--------\n";
+todayRows.forEach(row => {
+  table += (row[0] || "").padEnd(13) + "| ";
+  table += moment(row[2], "h:mm A").format("h:mm A").padEnd(8) + "| ";
+  table += moment(row[3], "h:mm A").format("h:mm A").padEnd(7) + "\n";
+});
+table += "```";
 
     res.json({
-      response_type: "in_channel", // Show to everyone!
-      text: `*Attendance for ${today}:*\n${table}`
+      response_type: "in_channel",
+      text: `*Attendance for ${today}:*
+${table}`
     });
   } catch (err) {
     console.error("viewattendance error:", err);
-    return res.json({
+    res.json({
       response_type: "ephemeral",
-      text: "Error fetching attendance data. Please check that your Google Sheet has a tab for this year, is shared with your service account, and your Sheet ID is correct."
+      text: "⚠️ Error fetching attendance. Please try again later."
     });
   }
 });
 
-// /addovertime [employee name] MM/DD/YYYY hours [reason]
-app.post("/slack/command/addovertime", async (req, res) => {
-  const user_id = req.body.user_id;
-  const email = await fetchSlackEmail(user_id);
-  if (!await isAdmin(email)) {
-    return res.json({
-      response_type: "ephemeral",
-      text: "Only admins can use this command."
-    });
-  }
-  const args = req.body.text.trim().split(/\s+/);
-  if (args.length < 3) {
-    return res.json({
-      response_type: "ephemeral",
-      text: "Format: /addovertime [employee name] MM/DD/YYYY hours [reason]\nExample: /addovertime Lovelle 05/29/2024 2 End-of-month reporting"
-    });
-  }
-  const [empName, date, hours, ...reasonArr] = args;
-  const reason = reasonArr.join(" ") || "";
-  const year = moment(date, "MM/DD/YYYY").year().toString();
-  await ensureSheetExists(year);
-
-  // Find the row in the sheet
-  const result = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${year}!A:G`
-  });
-  const rows = result.data.values || [];
-  const rowIdx = rows.findIndex(
-    (row, idx) =>
-      idx > 0 &&
-      row[0] && row[0].toLowerCase() === empName.toLowerCase() &&
-      row[1] && row[1] === date
-  );
-
-  if (rowIdx > 0) {
-    // Update overtime hours and reason
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `${year}!F${rowIdx+1}`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: [[hours]] }
-    });
-    return res.json({
-      response_type: "in_channel",
-      text: `Overtime of ${hours} hour(s) added for ${empName} on ${date}. ${reason ? "Reason: " + reason : ""}`
-    });
-  } else {
-    return res.json({
-      response_type: "ephemeral",
-      text: `No attendance record found for ${empName} on ${date}. Please ensure the employee has clocked in/out first.`
-    });
-  }
-});
-
-// /addundertime [employee name] MM/DD/YYYY hours [reason]
-app.post("/slack/command/addundertime", async (req, res) => {
-  const user_id = req.body.user_id;
-  const email = await fetchSlackEmail(user_id);
-  if (!await isAdmin(email)) {
-    return res.json({
-      response_type: "ephemeral",
-      text: "Only admins can use this command."
-    });
-  }
-  const args = req.body.text.trim().split(/\s+/);
-  if (args.length < 3) {
-    return res.json({
-      response_type: "ephemeral",
-      text: "Format: /addundertime [employee name] MM/DD/YYYY hours [reason]\nExample: /addundertime Lovelle 05/29/2024 1 Left early for appointment"
-    });
-  }
-  const [empName, date, hours, ...reasonArr] = args;
-  const reason = reasonArr.join(" ") || "";
-  const year = moment(date, "MM/DD/YYYY").year().toString();
-  await ensureSheetExists(year);
-
-  // Find the row in the sheet
-  const result = await sheets.spreadsheets.values.get({
-    spreadsheetId: SHEET_ID,
-    range: `${year}!A:G`
-  });
-  const rows = result.data.values || [];
-  const rowIdx = rows.findIndex(
-    (row, idx) =>
-      idx > 0 &&
-      row[0] && row[0].toLowerCase() === empName.toLowerCase() &&
-      row[1] && row[1] === date
-  );
-
-  if (rowIdx > 0) {
-    // Update undertime hours and reason
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SHEET_ID,
-      range: `${year}!G${rowIdx+1}`,
-      valueInputOption: "USER_ENTERED",
-      requestBody: { values: [[hours]] }
-    });
-    return res.json({
-      response_type: "in_channel",
-      text: `Undertime of ${hours} hour(s) added for ${empName} on ${date}. ${reason ? "Reason: " + reason : ""}`
-    });
-  } else {
-    return res.json({
-      response_type: "ephemeral",
-      text: `No attendance record found for ${empName} on ${date}. Please ensure the employee has clocked in/out first.`
-    });
-  }
-});
-
-// /help (shows all commands for admin, basic for employee)
+// /help Command
 app.post("/slack/command/help", async (req, res) => {
-  const user_id = req.body.user_id;
-  let email = "";
-  let admin = false;
+  const helpText = `Here are the available commands you can use:
 
-  try {
-    email = await fetchSlackEmail(user_id);
-    admin = await isAdmin(email);
-    console.log("HELP command user:", email, "ADMIN?", admin); // Debug log
-  } catch (err) {
-    return res.json({
-      response_type: "in_channel",
-      text: "⚠️ Bot error: Could not check admin status. Please check your Google Sheet's Admins tab exists and is shared properly."
-    });
-  }
+• /clockin [time] — Clock in for the day. Example: /clockin 8:00 AM
+• /clockout [time] — Clock out for the day. Example: /clockout 5:00 PM
+• /myattendance — View your own attendance for today.
+• /viewattendance — View everyone's attendance for today.`;
 
-  let text =
-    "*Creo Attendance Bot — Help*\n\n" +
-    "• `/clockin [h:mm AM/PM]` — Clock in (optional time).\n" +
-    "• `/clockout [h:mm AM/PM]` — Clock out (optional time).\n" +
-    "• `/myattendance [date|range]` — See your attendance.\n" +
-    "• `/viewattendance` — Show today’s attendance table for everyone.\n" +
-    "• `/addovertime [employee name] MM/DD/YYYY hours [reason]` — (Admin) Add overtime to an employee.\n" +
-    "• `/addundertime [employee name] MM/DD/YYYY hours [reason]` — (Admin) Add undertime to an employee.\n" +
-    "• Overtime and undertime requests are approved by admin.\n";
-
-  if (admin) {
-    text +=
-      "\n*Admin Commands:*\n" +
-      "• `/editattendance @user MM/DD/YYYY IN OUT` — Edit a user’s record.\n" +
-      "• `/approve` — Approve pending overtime/undertime requests.\n" +
-      "• `/addovertime @user MM/DD/YYYY [hours]` — Add overtime.\n" +
-      "• `/addundertime @user MM/DD/YYYY [hours]` — Add undertime.\n" +
-      "• `/history @user [date|range]` — Get user attendance history.\n" +
-      "• `/addadmin email` — Add admin.\n" +
-      "• `/removeadmin email` — Remove admin.\n";
-  }
-
-  res.json({ response_type: "in_channel", text });
+  res.json({ response_type: "ephemeral", text: helpText });
 });
 
+// Home Route
 app.get("/", (req, res) => {
   res.send("Attendance Bot running!");
 });
 
+// Start Server
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Attendance Bot running on port ${PORT}`);
