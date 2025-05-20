@@ -222,6 +222,7 @@ app.post("/slack/command/clockout", async (req, res) => {
     else return res.json({ response_type: "ephemeral", text: "Please enter time as `h:mm AM/PM` (example: 5:00 PM)" });
   }
   const name = await fetchSlackDisplayName(user_id);
+
   await upsertAttendance({ name, date, clockIn: null, clockOut });
   res.json({
     response_type: "ephemeral",
@@ -297,8 +298,7 @@ todayRows.forEach(row => {
   const clockOutFormatted = row[3] ? moment(row[3], "h:mm A").format("h:mm A") : "-";
   table += (row[0] || "").padEnd(13) + "| ";
   table += clockInFormatted.padEnd(8) + "| ";
-  table += clockOutFormatted.padEnd(7) + "
-";
+  table += clockOutFormatted.padEnd(7) + "\n";
 });
 table += "```";
 
