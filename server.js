@@ -22,6 +22,15 @@ const sheets = google.sheets({ version: "v4", auth });
 
 // ==== UTILITIES ====
 
+// Send delayed response to Slack
+async function sendDelayedResponse(response_url, message) {
+  try {
+    await axios.post(response_url, message);
+  } catch (error) {
+    console.error("Error sending delayed response:", error);
+  }
+}
+
 // Fetch Slack Display Name
 async function fetchSlackDisplayName(user_id) {
   try {
@@ -498,9 +507,18 @@ async function getTodayAttendancePreview() {
 
 // /clockin Endpoint
 app.post("/slack/command/clockin", async (req, res) => {
+  const user_id = req.body.user_id;
+  const date = moment().tz(TIMEZONE).format("MM/DD/YYYY");
+  const response_url = req.body.response_url;
+  
+  // Immediate response to prevent timeout
+  res.json({
+    response_type: "ephemeral",
+    text: "⏳ Processing your clock in request..."
+  });
+
+  // Process in background
   try {
-    const user_id = req.body.user_id;
-    const date = moment().tz(TIMEZONE).format("MM/DD/YYYY");
     let clockIn = moment().tz(TIMEZONE).format("h:mm A");
     
     if (req.body.text) {
@@ -508,25 +526,31 @@ app.post("/slack/command/clockin", async (req, res) => {
       if (custom) {
         clockIn = custom;
       } else {
-        return res.json({ 
-          response_type: "ephemeral", 
-          text: "⛔ Please enter time in a valid format:\n• `7:30 AM` or `7:30 PM`\n• `730 AM` or `730 PM`\n• `19:30` (24-hour format)\n• `7` (hour only)" 
+        await sendDelayedResponse(response_url, {
+          response_type: "ephemeral",
+          text: "⛔ Please enter time in a valid format:\n• `7:30 AM` or `7:30 PM`\n• `730 AM` or `730 PM`\n• `19:30` (24-hour format)\n• `7` (hour only)"
         });
+        return;
       }
     }
     
     const name = await fetchSlackDisplayName(user_id);
     if (name === "Unknown") {
-      return res.json({ 
-        response_type: "ephemeral", 
-        text: "⚠️ Could not fetch your user information. Please try again later." 
+      await sendDelayedResponse(response_url, {
+        response_type: "ephemeral",
+        text: "⚠️ Could not fetch your user information. Please try again later."
       });
+      return;
     }
 
     // Validate clock in action
     const validation = await validateClockAction(name, date, 'clockin', clockIn);
     if (!validation.valid) {
-      return res.json({ response_type: "ephemeral", text: validation.message });
+      await sendDelayedResponse(response_url, {
+        response_type: "ephemeral",
+        text: validation.message
+      });
+      return;
     }
 
     await upsertAttendance({ name, date, clockIn, clockOut: null });
@@ -534,24 +558,33 @@ app.post("/slack/command/clockin", async (req, res) => {
     // Get today's attendance preview
     const attendancePreview = await getTodayAttendancePreview();
     
-    res.json({
+    await sendDelayedResponse(response_url, {
       response_type: "ephemeral",
       text: `✅ *Clocked in successfully!*\n👤 Name: *${name}*\n🕐 Time: *${clockIn}*\n📅 Date: ${date}${attendancePreview}`
     });
   } catch (error) {
     console.error("Clock in error:", error);
-    res.json({ 
-      response_type: "ephemeral", 
-      text: "⚠️ An error occurred while clocking in. Please try again later." 
+    await sendDelayedResponse(response_url, {
+      response_type: "ephemeral",
+      text: "⚠️ An error occurred while clocking in. Please try again later."
     });
   }
 });
 
 // /clockout Endpoint
 app.post("/slack/command/clockout", async (req, res) => {
+  const user_id = req.body.user_id;
+  const date = moment().tz(TIMEZONE).format("MM/DD/YYYY");
+  const response_url = req.body.response_url;
+  
+  // Immediate response to prevent timeout
+  res.json({
+    response_type: "ephemeral",
+    text: "⏳ Processing your clock out request..."
+  });
+
+  // Process in background
   try {
-    const user_id = req.body.user_id;
-    const date = moment().tz(TIMEZONE).format("MM/DD/YYYY");
     let clockOut = moment().tz(TIMEZONE).format("h:mm A");
     
     if (req.body.text) {
@@ -559,25 +592,31 @@ app.post("/slack/command/clockout", async (req, res) => {
       if (custom) {
         clockOut = custom;
       } else {
-        return res.json({ 
-          response_type: "ephemeral", 
-          text: "⛔ Please enter time in a valid format:\n• `5:00 PM` or `5:00 AM`\n• `500 PM` or `500 AM`\n• `17:00` (24-hour format)\n• `5` (hour only)" 
+        await sendDelayedResponse(response_url, {
+          response_type: "ephemeral",
+          text: "⛔ Please enter time in a valid format:\n• `5:00 PM` or `5:00 AM`\n• `500 PM` or `500 AM`\n• `17:00` (24-hour format)\n• `5` (hour only)"
         });
+        return;
       }
     }
     
     const name = await fetchSlackDisplayName(user_id);
     if (name === "Unknown") {
-      return res.json({ 
-        response_type: "ephemeral", 
-        text: "⚠️ Could not fetch your user information. Please try again later." 
+      await sendDelayedResponse(response_url, {
+        response_type: "ephemeral",
+        text: "⚠️ Could not fetch your user information. Please try again later."
       });
+      return;
     }
 
     // Validate clock out action
     const validation = await validateClockAction(name, date, 'clockout', clockOut);
     if (!validation.valid) {
-      return res.json({ response_type: "ephemeral", text: validation.message });
+      await sendDelayedResponse(response_url, {
+        response_type: "ephemeral",
+        text: validation.message
+      });
+      return;
     }
 
     await upsertAttendance({ name, date, clockIn: null, clockOut });
@@ -585,15 +624,15 @@ app.post("/slack/command/clockout", async (req, res) => {
     // Get today's attendance preview
     const attendancePreview = await getTodayAttendancePreview();
     
-    res.json({
+    await sendDelayedResponse(response_url, {
       response_type: "ephemeral",
       text: `✅ *Clocked out successfully!*\n👤 Name: *${name}*\n🕐 Time: *${clockOut}*\n📅 Date: ${date}${attendancePreview}`
     });
   } catch (error) {
     console.error("Clock out error:", error);
-    res.json({ 
-      response_type: "ephemeral", 
-      text: "⚠️ An error occurred while clocking out. Please try again later." 
+    await sendDelayedResponse(response_url, {
+      response_type: "ephemeral",
+      text: "⚠️ An error occurred while clocking out. Please try again later."
     });
   }
 });
@@ -754,13 +793,7 @@ app.post("/slack/command/help", async (req, res) => {
 • \`today\`, \`yesterday\`
 • \`this week\`, \`last week\`, \`this month\`
 • \`05/22/2025\` (MM/DD/YYYY)
-• \`01/01/2025 to 01/31/2025\` (date ranges)
-
-*Features:*
-• Automatic lunch break deduction (12-1 PM)
-• Prevents duplicate clock ins/outs
-• Shows attendance preview after clocking in/out
-• Validates time sequences (clock out must be after clock in)`;
+• \`01/01/2025 to 01/31/2025\` (date ranges)`;
 
   res.json({ response_type: "ephemeral", text: helpText });
 });
