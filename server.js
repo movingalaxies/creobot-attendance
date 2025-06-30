@@ -765,6 +765,54 @@ app.post("/slack/command/viewattendance", async (req, res) => {
   }
 });
 
+// Holiday 
+app.post("/slack/command/holidays", async (req, res) => {
+  const response_url = req.body.response_url;
+  
+  // Immediate response to prevent timeout
+  res.json({
+    response_type: "in_channel",
+    text: "📅 Loading holiday calendar..."
+  });
+
+  // Process in background with delayed response
+  try {
+    // Validate the image URL exists
+    if (!process.env.HOLIDAY_IMAGE_URL) {
+      await sendDelayedResponse(response_url, {
+        response_type: "in_channel",
+        text: "⚠️ Holiday calendar is not configured. Please contact admin."
+      });
+      return;
+    }
+
+    // Send blocks response with image
+    await sendDelayedResponse(response_url, {
+      response_type: "in_channel",
+      blocks: [
+        {
+          type: "section",
+          text: {
+            type: "mrkdwn",
+            text: "📅 *Company Holidays*"
+          }
+        },
+        {
+          type: "image",
+          image_url: process.env.HOLIDAY_IMAGE_URL,
+          alt_text: "2025 Holiday Calendar - Green: Regular, Orange: Special"
+        }
+      ]
+    });
+  } catch (error) {
+    console.error("Holidays command error:", error);
+    await sendDelayedResponse(response_url, {
+      response_type: "in_channel",
+      text: "⚠️ Error loading holiday calendar. Please try again later."
+    });
+  }
+});
+
 // /help Command
 app.post("/slack/command/help", async (req, res) => {
   const helpText = `🤖 *Attendance Bot Help*
@@ -793,7 +841,10 @@ app.post("/slack/command/help", async (req, res) => {
 • \`today\`, \`yesterday\`
 • \`this week\`, \`last week\`, \`this month\`
 • \`05/22/2025\` (MM/DD/YYYY)
-• \`01/01/2025 to 01/31/2025\` (date ranges)`;
+• \`01/01/2025 to 01/31/2025\` (date ranges)
+
+*New Features:*
+- \`/holidays\` - View holiday schedule`;
 
   res.json({ response_type: "ephemeral", text: helpText });
 });
