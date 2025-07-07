@@ -246,15 +246,16 @@ function parseDateRange(arg) {
 // Validate Clock In/Out Logic
 async function validateClockAction(name, date, action, time) {
   const sheetName = moment().tz(TIMEZONE).format("YYYY");
-  
+
   try {
     await ensureSheetExists(sheetName);
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
       range: `${sheetName}!A:G`
     });
-    
+
     const rows = res.data.values || [];
+
     const existingRecord = rows.find(
       (row, idx) =>
         idx > 0 &&
@@ -264,6 +265,7 @@ async function validateClockAction(name, date, action, time) {
 
     if (action === 'clockin') {
       if (existingRecord && existingRecord[2]) {
+        console.warn(`[VALIDATION BLOCKED] ${name} already clocked in at ${existingRecord[2]}`);
         return {
           valid: false,
           message: `⚠️ You've already clocked in today at *${existingRecord[2]}*. Use /clockout to clock out.`
@@ -271,23 +273,26 @@ async function validateClockAction(name, date, action, time) {
       }
     } else if (action === 'clockout') {
       if (!existingRecord || !existingRecord[2]) {
+        console.warn(`[VALIDATION BLOCKED] ${name} has not clocked in yet on ${date}`);
         return {
           valid: false,
           message: `⚠️ You haven't clocked in today yet. Use /clockin first.`
         };
       }
       if (existingRecord[3]) {
+        console.warn(`[VALIDATION BLOCKED] ${name} already clocked out at ${existingRecord[3]}`);
         return {
           valid: false,
           message: `⚠️ You've already clocked out today at *${existingRecord[3]}*.`
         };
       }
-      
+
       // Validate clock out time is after clock in time
       const clockInTime = moment(existingRecord[2], "h:mm A");
       const clockOutTime = moment(time, "h:mm A");
-      
+
       if (clockOutTime.isBefore(clockInTime)) {
+        console.warn(`[VALIDATION BLOCKED] ${name}'s clock out time (${time}) is earlier than clock in time (${existingRecord[2]})`);
         return {
           valid: false,
           message: `⚠️ Clock out time (${time}) cannot be earlier than clock in time (${existingRecord[2]}).`
@@ -295,9 +300,11 @@ async function validateClockAction(name, date, action, time) {
       }
     }
 
+    console.log(`[VALIDATION] Passed for ${name} on ${date} (${action}) at ${time}`);
     return { valid: true };
+
   } catch (error) {
-    console.error("Error validating clock action:", error);
+    console.error(`[VALIDATION ERROR] Failed to validate ${action} for ${name} on ${date}:`, error.message);
     return {
       valid: false,
       message: "⚠️ Error validating attendance. Please try again later."
@@ -348,15 +355,17 @@ async function ensureSheetExists(sheetName) {
 // Insert or Update Attendance Entry
 async function upsertAttendance({ name, date, clockIn, clockOut }) {
   const sheetName = moment().tz(TIMEZONE).format("YYYY");
-  
+
   try {
     await ensureSheetExists(sheetName);
+
+    console.log(`[UPSERT] Start - Name: ${name}, Date: ${date}, ClockIn: ${clockIn}, ClockOut: ${clockOut}`);
 
     const res = await sheets.spreadsheets.values.get({
       spreadsheetId: SHEET_ID,
       range: `${sheetName}!A:G`
     });
-    
+
     const rows = res.data.values || [];
     const rowIdx = rows.findIndex(
       (row, idx) =>
@@ -384,6 +393,8 @@ async function upsertAttendance({ name, date, clockIn, clockOut }) {
         rows[rowIdx][5] || "",
         rows[rowIdx][6] || ""
       ];
+
+      console.log(`[UPSERT] Updating existing row #${rowIdx + 1} for ${name}`);
       await sheets.spreadsheets.values.update({
         spreadsheetId: SHEET_ID,
         range: `${sheetName}!C${rowIdx + 1}:G${rowIdx + 1}`,
@@ -392,18 +403,25 @@ async function upsertAttendance({ name, date, clockIn, clockOut }) {
           values: [valuesToUpdate]
         }
       });
+
+      console.log(`[UPSERT SUCCESS] Updated row for ${name}`);
     } else {
+      const newRow = [name, date, clockIn || "", clockOut || "", totalHours, "", ""];
+      console.log(`[UPSERT] Appending new row: ${JSON.stringify(newRow)}`);
+
       await sheets.spreadsheets.values.append({
         spreadsheetId: SHEET_ID,
         range: `${sheetName}!A:G`,
         valueInputOption: "USER_ENTERED",
         requestBody: {
-          values: [[name, date, clockIn || "", clockOut || "", totalHours, "", ""]]
+          values: [newRow]
         }
       });
+
+      console.log(`[UPSERT SUCCESS] Appended row for ${name}`);
     }
   } catch (error) {
-    console.error("Error upserting attendance:", error);
+    console.error(`[UPSERT ERROR] Failed to upsert attendance for ${name} on ${date}:`, error.message, error.stack);
     throw new Error("Failed to save attendance record");
   }
 }
