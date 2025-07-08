@@ -8,6 +8,10 @@ const axios = require("axios");
 const app = express();
 app.use(bodyParser.urlencoded({ extended: true }));
 
+app.get("/", (req, res) => {
+  res.status(200).send("OK");
+});
+
 // ==== CONFIG ====
 const SHEET_ID = process.env.SHEET_ID;
 const TIMEZONE = "Asia/Manila";
